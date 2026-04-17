@@ -1,0 +1,256 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{placeins}
+
+\lstset{
+    language=C,
+    backgroundcolor=\color{lightgray!20},
+    frame=single,
+    breaklines=true,
+    numbers=left,
+    numberstyle=\tiny,
+    stepnumber=1,
+    numbersep=5pt,
+    captionpos=b,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red},
+    showstringspaces=false
+}
+
+\title{LabReSiD25 - Hands-On 1}
+\author{Davide Ferrara - 518629}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Esercizio 1: Comunicazione UDP}
+
+\subsection{Obbiettivo}
+Usando i Linux Socket scrivere un server (\texttt{server\_udp.c}) ed un client
+(\texttt{client\_udp.c}) che realizzino una comunicazione bidirezionale 
+basata su UDP.
+\newline
+UDP (User Datagram Protocol) è un protocollo non orientato alla
+connessione del modello TCP/IP. A differenza di TCP non richiede
+\texttt{connect()}/\texttt{listen()}/\texttt{accept()} ma utilizza direttamente
+\texttt{recvfrom()} e \texttt{sendto()}.
+
+\subsection{Server UDP}
+
+Includo le librerie necessarie per la comunicazione di rete.
+\begin{lstlisting}[caption={server\_udp.c - Include}]
+#include <arpa/inet.h>   // inet_ntoa, htons, ntohs
+#include <stddef.h>      // size_t
+#include <stdio.h>       // printf, perror
+#include <stdlib.h>      // exit
+#include <string.h>      // memset, strlen
+#include <sys/socket.h>  // socket, bind, recvfrom, sendto
+#include <unistd.h>       // close
+\end{lstlisting}
+\FloatBarrier
+
+Definisco le costanti per la porta e la dimensione del buffer.
+\begin{lstlisting}[caption={server\_udp.c - Costanti}]
+#define PORT 8080
+#define BUF_SIZE 1024
+\end{lstlisting}
+\FloatBarrier
+
+Creo la struttura \texttt{sockaddr\_in} per IPv4 contenente indirizzo e porta.
+\begin{itemize}
+    \item \texttt{AF\_INET}: famiglia di indirizzi IPv4
+    \item \texttt{htons()}: converte la porta in formato di rete (big-endian)
+    \item \texttt{INADDR\_ANY = 0.0.0.0}: il server ascolta su TUTTE le interfacce di rete
+\end{itemize}
+\begin{lstlisting}[caption={server\_udp.c - sockaddr\_in}]
+struct sockaddr_in addr_in;
+memset(&addr_in, 0, sizeof(addr_in));
+addr_in.sin_family = AF_INET;
+addr_in.sin_port = htons(PORT);
+addr_in.sin_addr.s_addr = INADDR_ANY;
+\end{lstlisting}
+\FloatBarrier
+
+Creo il socket di tipo \texttt{SOCK\_DGRAM} (datagram) per UDP. La \texttt{socket()} restituisce un file descriptor. Controllo con \texttt{-1} per gestire gli errori.
+\begin{lstlisting}[caption={server\_udp.c - socket()}]
+int server_fd = socket(AF_INET, SOCK_DGRAM, 0);
+if (server_fd == -1) {
+    perror("Creazione socket fallita!");
+    exit(1);
+}
+\end{lstlisting}
+\FloatBarrier
+
+Il \texttt{bind()} associa il socket all'indirizzo e porta specificati nella struttura. Il server rimane in ascolto su quella porta.
+\begin{lstlisting}[caption={server\_udp.c - bind()}]
+if (bind(server_fd, (struct sockaddr *)&addr_in, sizeof(addr_in)) == -1) {
+    perror("Errore nel bind");
+    close(server_fd);
+    exit(1);
+}
+printf("Server UDP in ascolto sulla porta %d...\n", PORT);
+\end{lstlisting}
+\FloatBarrier
+
+Alloco il buffer per ricevere i dati e la struttura \texttt{sockaddr\_in} per memorizzare le informazioni sul client.
+\begin{lstlisting}[caption={server\_udp.c - Buffer}]
+char buf[BUF_SIZE];
+struct sockaddr_in client_addr;
+socklen_t client_len = sizeof(client_addr);
+\end{lstlisting}
+\FloatBarrier
+
+Ciclo infinito: \texttt{recvfrom()} è bloccante e riceve datagrammi UDP,
+restituisce anche l'indirizzo del client e dopo aver stampato il messaggio,
+rispondo con \texttt{sendto()}.
+
+\begin{lstlisting}[caption={server\_udp.c - recvfrom/sendto}]
+while (1) {
+    ssize_t n = recvfrom(server_fd, buf, sizeof(buf) - 1, 0,
+                         (struct sockaddr *)&client_addr, &client_len);
+    if (n > 0) {
+        buf[n] = '\0';
+        printf("Ricevuto da %s:%d: %s\n", 
+               inet_ntoa(client_addr.sin_addr),
+               ntohs(client_addr.sin_port), buf);
+        char *msg = "pong\n";
+        sendto(server_fd, msg, strlen(msg), 0,
+               (struct sockaddr *)&client_addr, client_len);
+    }
+}
+\end{lstlisting}
+\FloatBarrier
+
+\subsection{Client UDP}
+
+Struttura dati analoga al server, ma per il server remoto,
+uso \texttt{127.0.0.1} (localhost) come indirizzo del server.
+\begin{lstlisting}[caption={client\_udp.c - sockaddr\_in}]
+struct sockaddr_in server_addr;
+memset(&server_addr, 0, sizeof(server_addr));
+server_addr.sin_family = AF_INET;
+server_addr.sin_port = htons(PORT);
+server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+\end{lstlisting}
+\FloatBarrier
+
+\newpage
+Invio il messaggio "ping"" al server con \texttt{sendto()},
+ricevo la risposta con \texttt{recvfrom()}.
+Il \texttt{NULL} nei parametri finali indica che non mi serve l'indirizzo
+del server (lo conosco già).
+\newline
+\texttt{sleep(1)} invece pausa il ciclo di 1 secondo.
+\begin{lstlisting}[caption={client\_udp.c - Invio/Ricezione}]
+char buf[BUF_SIZE];
+while (1) {
+    sendto(client_fd, "ping\n", 5, 0,
+           (struct sockaddr *)&server_addr, sizeof(server_addr));
+    printf("Inviato a %s:%d: ping\n", ADDR, PORT);
+    
+    ssize_t n = recvfrom(client_fd, buf, sizeof(buf) - 1, 0, NULL, NULL);
+    if (n > 0) {
+        buf[n] = '\0';
+        printf("Ricevuto da %s:%d: %s\n", ADDR, PORT, buf);
+    }
+    sleep(1);
+}
+\end{lstlisting}
+\FloatBarrier
+
+Chiudo il file descriptor.
+\begin{lstlisting}[caption={client\_udp.c - Chiusura}]
+close(client_fd);
+return 0;
+\end{lstlisting}
+\FloatBarrier
+
+\subsection{Differenze Client/Server}
+Il server effettua il \texttt{bind()} sulla porta per rimanere in ascolto. Il client invia direttamente al server senza bind. La restante logica è praticamente uguale.
+
+\subsection{Output di esempio}
+\begin{lstlisting}[caption={Output server}]
+Server UDP in ascolto sulla porta 8080...
+Ricevuto da 127.0.0.1:37698: ping
+Ricevuto da 127.0.0.1:37698: ping
+Ricevuto da 127.0.0.1:37698: ping
+\end{lstlisting}
+\FloatBarrier
+
+\begin{lstlisting}[caption={Output client}]
+Avvio del Client...
+Inviato a 127.0.0.1:8080: ping
+Ricevuto da 127.0.0.1:8080: pong
+\end{lstlisting}
+\FloatBarrier
+
+\section{Compilazione}
+Per compilare entrambi i programmi usiamo \texttt{make}.
+\begin{lstlisting}[caption={Compilazione}]
+make
+\end{lstlisting}
+\FloatBarrier
+Per rimuovere i file compilati usiamo \texttt{make clean}.
+\begin{lstlisting}[caption={Clean}]
+make clean
+\end{lstlisting}
+\FloatBarrier
+
+\section{Esercizio 2: File Descriptor}
+
+\subsection{Obbiettivo}
+Listare, attraverso l'opportuno tool da riga di comando, il file descriptor
+relativo al programma precedente ed analizzarne l'output.
+
+\subsection{Tool: lsof}
+Il comando \texttt{lsof} (List Open Files) permette di visualizzare i file aperti da un processo.
+\begin{lstlisting}[caption={Comando lsof}]
+bash$ lsof -i :8080
+\end{lstlisting}
+\FloatBarrier
+
+\newpage
+\subsection{Output}
+\begin{lstlisting}[caption={Output lsof}]
+COMMAND     PID  USER FD   TYPE DEVICE SIZE/OFF NODE NAME
+server_udp 70928 dff    3u  IPv4 334618  0t0    UDP *:http-alt
+\end{lstlisting}
+\FloatBarrier
+
+\subsection{Analisi}
+\begin{itemize}
+    \item \textbf{COMMAND}: nome del comando/processo (\texttt{server\_udp})
+    \item \textbf{PID}: identificativo univoco del processo (70928)
+    \item \textbf{USER}: utente che ha lanciato il processo (dff)
+    \item \textbf{FD 3u}: file descriptor 3 in modalita' read/write
+
+    \textbf{Contesto sui file descriptor:}
+    Ogni processo in Linux ha i suoi file descriptor. I primi 3 sono riservati:
+    \begin{itemize}
+        \item fd 0: standard input (stdin)
+        \item fd 1: standard output (stdout)
+        \item fd 2: standard error (stderr)
+    \end{itemize}
+    I socket di rete vengono assegnati ai fd successivi. Il nostro server ha il socket su fd 3. La lettera \texttt{u} indica che il socket UDP supporta sia invio che ricezione.
+
+    \item \textbf{TYPE IPv4}: famiglia di indirizzi IPv4
+    \item \textbf{DEVICE}: numero del nodo di rete assegnato dal kernel
+    \item \textbf{SIZE/OFF}: dimensione del buffer o offset (0t0 = nessun offset)
+    \item \textbf{NODE}: numero di porta assegnato dal kernel (334618)
+    \item \textbf{NAME}: indirizzo di binding
+\end{itemize}
+
+\section{Conclusioni}
+In questa hands-on ho implementato un sistema client-server UDP funzionante,
+comprendendo le differenze tra socket UDP e TCP. Ho inoltre appreso come
+monitorare i file descriptor dei processi di rete utilizzando \texttt{lsof}.
+
+\end{document}
