@@ -1,0 +1,680 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{placeins}
+
+\lstset{
+    language=C,
+    backgroundcolor=\color{lightgray!20},
+    frame=single,
+    breaklines=true,
+    numbers=left,
+    numberstyle=\tiny,
+    stepnumber=1,
+    numbersep=5pt,
+    captionpos=b,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red},
+    showstringspaces=false
+}
+
+\lstdefinestyle{output}{
+    language={},
+    backgroundcolor=\color{lightgray!20},
+    frame=single,
+    breaklines=true,
+    numbers=none,
+    captionpos=b,
+    basicstyle=\ttfamily\small,
+    keywordstyle={},
+    commentstyle={},
+    stringstyle={},
+    showstringspaces=false
+}
+
+\title{LabReSiD25 - Hands-On 2}
+\author{Davide Ferrara - 518629}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section*{Traccia}
+Usando i Linux Socket scrivere un server bloccante (\texttt{server\_tcp\_block.c}),
+un server non bloccante (\texttt{server\_tcp\_nonblock.c}) ed un client (\texttt{client\_tcp.c})
+che realizzino una comunicazione basata su TCP.
+Il client deve inviare la successione dei numeri di Fibonacci, mentre il server
+deve effettuare un controllo sulla successione ed inviare una stringa di
+acknowledgment (attenzione, diverso da ACK!).
+
+% ============================================================
+\section{Client TCP}
+
+\subsection{Obbiettivo}
+Il client genera la sequenza di Fibonacci fino a \texttt{F(n)}, la converte in
+stringa (es. \texttt{"0 1 1 2 3 5\textbackslash n"}) e la invia al server via TCP.
+Attende la risposta (\texttt{ACK} o \texttt{NACK}) e ripete per \texttt{reps}
+volte sulla stessa connessione prima di chiudere.
+\newline
+Accetta due argomenti da riga di comando: \texttt{n} (indice di Fibonacci) e
+\texttt{reps} (numero di invii, default 1).
+
+\subsection{client.c}
+
+\subsubsection{Include e costanti}
+\texttt{SERVER\_ADDR} è impostato a \texttt{0.0.0.0} per connettersi al
+localhost. \texttt{int\_to\_char()} converte un intero in carattere ASCII
+sommando \texttt{'0'}, operazione inversa rispetto al parsing del server.
+
+\begin{lstlisting}[caption={client.c - Include e costanti}]
+#include "fibo.h"
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#define SERVER_ADDR "0.0.0.0"
+#define PORT 8080
+
+char int_to_char(int n) { return '0' + n; }
+\end{lstlisting}
+\FloatBarrier
+
+\subsubsection{Costruzione del messaggio}
+Genera la sequenza con \texttt{fibo\_sequence()} e la converte in stringa
+cifra per cifra usando \texttt{int\_to\_char()}. I numeri sono separati da
+spazi e la stringa termina con \texttt{\textbackslash n}.
+
+\begin{lstlisting}[caption={client.c - costruzione messaggio}]
+int n = atoi(argv[1]);
+int reps = (argc == 3) ? atoi(argv[2]) : 1;
+
+// Genera la sequenza di Fibonacci fino a F(n) e la converte in stringa
+// Es. n=5 -> "0 1 1 2 3 5\n"
+fibo_sequence_t fs;
+fibo_init(&fs);
+fibo_sequence(&fs, n);
+char msg[1024];
+int cur = 0;
+for (int i = 0; i < fs.idx; i++) {
+  if (i > 0) msg[cur++] = ' ';
+  msg[cur++] = int_to_char(fs.array[i]);
+}
+msg[cur++] = '\n';
+msg[cur] = '\0';
+\end{lstlisting}
+\FloatBarrier
+
+\subsubsection{Connessione al server}
+\texttt{socket()} crea il socket TCP. \texttt{connect()} stabilisce la
+connessione con il server eseguendo il three-way handshake. La connessione
+viene aperta una sola volta prima del loop.
+
+\begin{lstlisting}[caption={client.c - socket() e connect()}]
+// SOCK_STREAM crea un socket TCP orientato alla connessione
+int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+if (client_fd == -1) {
+  perror("Errore nella creazione del socket");
+  exit(1);
+}
+
+// connect() stabilisce la connessione TCP con il server (three-way handshake)
+if (connect(client_fd, (struct sockaddr *)&server_addr,
+            sizeof(server_addr)) == -1) {
+  perror("Errore nella connessione");
+  exit(1);
+}
+\end{lstlisting}
+\FloatBarrier
+
+\subsubsection{Loop di invio e ricezione}
+Il loop invia il messaggio \texttt{reps} volte sulla stessa connessione e
+attende la risposta del server ad ogni iterazione. \texttt{close()} chiude
+la connessione solo dopo l'ultimo invio.
+
+\begin{lstlisting}[caption={client.c - loop write/read}]
+// Invia il messaggio reps volte sulla stessa connessione e attende ACK/NACK
+for (int i = 0; i < reps; i++) {
+  if (write(client_fd, msg, strlen(msg)) == -1) {
+    perror("Errore nel socket");
+    exit(1);
+  }
+
+  char buf[1024];
+  int r = read(client_fd, buf, sizeof(buf));
+  buf[r] = '\0';
+  printf("[CLIENT.c] %s:%d: %s", SERVER_ADDR, PORT, buf);
+
+  sleep(1);
+}
+
+// Chiude la connessione dopo aver inviato tutti i messaggi
+close(client_fd);
+\end{lstlisting}
+\FloatBarrier
+
+\subsection{Output di esempio}
+
+\begin{lstlisting}[style=output,caption={Output client - ./client 5 3}]
+[CLIENT.c] Sequenza di fibonacci: 0 1 1 2 3 5
+[CLIENT.c] 0.0.0.0:8080: ACK
+[CLIENT.c] 0.0.0.0:8080: ACK
+[CLIENT.c] 0.0.0.0:8080: ACK
+\end{lstlisting}
+\FloatBarrier
+
+% ============================================================
+\section{Server TCP Bloccante}
+
+\subsection{Obbiettivo}
+Il server TCP bloccante riceve dal client una sequenza di Fibonacci sotto forma
+di stringa (es. \texttt{"0 1 1 2 3"}), legge il messaggio dalla socket, effettua
+il parsing convertendo ogni carattere nel corrispondente intero e ricostruisce
+la sequenza. Se la sequenza è corretta risponde con la stringa \texttt{ACK},
+altrimenti con \texttt{NACK}.
+\newline
+Essendo bloccante, il server non può gestire più di un client alla volta:
+le chiamate \texttt{accept()} e \texttt{read()} bloccano il processo finché
+non arriva una connessione o dei dati.
+
+
+\subsection{server\_tcp\_block.c}
+
+\subsubsection{Include e costanti}
+Includo le librerie necessarie. Rispetto a UDP aggiungo \texttt{netinet/in.h}
+per le strutture TCP.
+
+\begin{lstlisting}[caption={server\_tcp\_block.c - Include}]
+#include "fibo.h"
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#define PORT 8080
+\end{lstlisting}
+\FloatBarrier
+
+\subsubsection{parse\_msg}
+Parsa il messaggio ricevuto dal client e popola la struttura \texttt{fibo\_sequence\_t}.
+I numeri sono separati da spazi. Caratteri \texttt{\textbackslash n} e \texttt{\textbackslash r} vengono ignorati.
+\newline
+La conversione da carattere a intero sfrutta la tabella ASCII: le cifre
+\texttt{'0'...'9'} sono consecutive (48...57), quindi \texttt{'7' - '0' = 55 - 48 = 7}.
+
+\begin{lstlisting}[caption={server\_tcp\_block.c - parse\_msg()}]
+void parse_msg(char *msg, fibo_sequence_t *fs) {
+  fibo_init(fs);
+
+  while (*msg != '\0') {
+    if (*msg == ' ' || *msg == '\n' || *msg == '\r') {
+      msg++;
+      continue;
+    }
+
+    int n = *msg - '0';
+    fibo_push(fs, n);
+
+    msg++;
+  }
+}
+\end{lstlisting}
+\FloatBarrier
+
+\subsubsection{Creazione del socket}
+Creo un socket di tipo \texttt{SOCK\_STREAM} per TCP. La differenza con UDP
+(\texttt{SOCK\_DGRAM}) è fondamentale poichè \texttt{SOCK\_STREAM} garantisce
+consegna ordinata e affidabile dei dati tramite connessione.
+\newline
+\texttt{SO\_REUSEADDR} permette di riutilizzare la porta subito dopo la chiusura
+del server, evitando l'errore \texttt{Address already in use} causato dallo stato
+\texttt{TIME\_WAIT} di TCP.
+
+\begin{lstlisting}[caption={server\_tcp\_block.c - socket() e SO\_REUSEADDR}]
+struct sockaddr_in addr;
+addr.sin_family = AF_INET;
+addr.sin_port = htons(PORT);
+addr.sin_addr.s_addr = INADDR_ANY;
+
+// SOCK_STREAM crea un socket TCP orientato alla connessione
+int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+if (server_fd == -1) {
+  perror("Errore nella creazione del socket");
+  exit(1);
+}
+
+// Evita "Address already in use" al riavvio: TCP tiene il socket
+// in TIME_WAIT per ~2 minuti dopo la chiusura
+int opt = 1;
+setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+\end{lstlisting}
+\FloatBarrier
+
+\subsubsection{bind() e listen()}
+\texttt{bind()} associa il socket all'indirizzo e porta configurati.
+\texttt{listen()} mette il socket in modalità ascolto con un backlog di 5:
+il kernel può tenere in coda fino a 5 connessioni in attesa di essere accettate.
+\textbf{Nota:} \texttt{listen()} non è bloccante, ritorna subito.
+
+\begin{lstlisting}[caption={server\_tcp\_block.c - bind() e listen()}]
+if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
+  perror("Errore nel bind del socket");
+  exit(1);
+}
+
+// Il backlog di 5 indica quante connessioni il kernel puo' accodare
+// mentre il server e' occupato a servire un client
+if (listen(server_fd, 5) == -1) {
+  perror("Error during listening");
+}
+\end{lstlisting}
+\FloatBarrier
+
+\subsubsection{Loop di accettazione: accept()}
+Il loop esterno chiama \texttt{accept()}, che \textbf{blocca} il processo finché
+un client non si connette. Quando arriva una connessione, \texttt{accept()} ritorna
+un nuovo file descriptor (\texttt{client\_fd}) dedicato esclusivamente a quella
+connessione. Il \texttt{server\_fd} originale rimane aperto per accettare altri client.
+\texttt{accept()} popola anche la struttura \texttt{client\_addr} con IP e porta del client.
+
+\begin{lstlisting}[caption={server\_tcp\_block.c - accept()}]
+struct sockaddr_in client_addr;
+socklen_t addrlen = sizeof(client_addr);
+char buf[1024];
+
+// Loop esterno: il server non termina mai, accetta un client alla volta
+while (1) {
+  // accept() blocca finche' un client non si connette.
+  // Ritorna un nuovo fd dedicato a quella connessione.
+  // Finche' siamo qui dentro, nessun altro client viene accettato.
+  int client_fd =
+      accept(server_fd, (struct sockaddr *)&client_addr, &addrlen);
+  if (client_fd == -1) {
+    perror("Could not accept connection");
+    continue;
+  }
+  // loop interno ...
+}
+\end{lstlisting}
+\FloatBarrier
+
+\subsubsection{Loop di lettura: read()}
+Il loop interno chiama \texttt{read()}, che \textbf{blocca} finché non arrivano dati.
+Il valore di ritorno indica:
+\begin{itemize}
+    \item \texttt{n > 0}: bytes letti correttamente
+    \item \texttt{n == 0}: il client ha chiuso la connessione
+    \item \texttt{n == -1}: errore
+\end{itemize}
+
+\begin{lstlisting}[caption={server\_tcp\_block.c - read()}]
+// Loop interno: legge piu' messaggi dalla stessa connessione
+// finche' il client non si disconnette
+while (1) {
+  // read() blocca finche' non arrivano dati.
+  // Ritorna 0 quando il client chiude la connessione (EOF).
+  ssize_t n = read(client_fd, buf, sizeof(buf));
+  if (n == 0) {
+    printf("Il Client si e' disconnesso!\n");
+    close(client_fd);
+    break;
+  }
+  if (n == -1) {
+    printf("Errore del client!\n");
+    break;
+  }
+
+  char ip_str[INET_ADDRSTRLEN];
+  inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str));
+  uint16_t port = ntohs(client_addr.sin_port);
+
+  buf[n] = '\0'; // aggiunge terminatore per usare buf come stringa C
+  printf("[SERVER_TPC_BLOCK.c] %s:%d: %s", ip_str, port, buf);
+  // verifica fibonacci ...
+}
+\end{lstlisting}
+\FloatBarrier
+
+\subsubsection{Verifica Fibonacci e risposta}
+Dopo aver ricevuto il messaggio, il server:
+\begin{enumerate}
+    \item Parsa la sequenza ricevuta dal client con \texttt{parse\_msg()}
+    \item Genera la propria sequenza con \texttt{fibo\_sequence()} della stessa lunghezza
+    \item Confronta le due sequenze con \texttt{fibo\_compare()}
+    \item Invia \texttt{ACK} se corretta, \texttt{NACK} se sbagliata
+\end{enumerate}
+\begin{lstlisting}[caption={server\_tcp\_block.c - verifica e risposta}]
+fibo_sequence_t fs, client_fs;
+memset(&fs, 0, sizeof(fibo_sequence_t));
+fibo_init(&fs);
+
+// Parsa la stringa ricevuta e genera la sequenza attesa
+parse_msg(buf, &client_fs);
+fibo_sequence(&fs, client_fs.idx - 1);
+
+if (fibo_compare(&fs, &client_fs) == 0) {
+  char *resp = "ACK\n";
+  write(client_fd, resp, strlen(resp));
+} else {
+  char *resp = "NACK\n";
+  write(client_fd, resp, strlen(resp));
+}
+// non chiudiamo: il client puo' inviare altri messaggi
+\end{lstlisting}
+\FloatBarrier
+
+\subsection{Limitazione: un client alla volta}
+Essendo bloccante, il server non può servire più client contemporaneamente.
+Mentre il loop interno legge e risponde ai messaggi del client A (porta 57804),
+la chiamata \texttt{accept()} non viene mai rieseguita: il client B (porta 57820)
+rimane in attesa nel backlog del kernel. Solo dopo che A si disconnette
+(\texttt{read()} ritorna 0), il server chiude \texttt{client\_fd}, esce dal loop
+interno e torna ad \texttt{accept()}, servendo B.
+
+\subsection{Output di esempio}
+
+\begin{lstlisting}[style=output,caption={Output server - due client sequenziali}]
+[TPC SERVER BLOCKING] Server is listening...
+[SERVER_TPC_BLOCK.c] 127.0.0.1:57804: 0 1 1 2 3 5
+[SERVER_TPC_BLOCK.c] Sent response to 127.0.0.1:57804: ACK
+[SERVER_TPC_BLOCK.c] 127.0.0.1:57804: 0 1 1 2 3 5
+[SERVER_TPC_BLOCK.c] Sent response to 127.0.0.1:57804: ACK
+[SERVER_TPC_BLOCK.c] 127.0.0.1:57804: 0 1 1 2 3 5
+[SERVER_TPC_BLOCK.c] Sent response to 127.0.0.1:57804: ACK
+Il Client si e' disconnesso!
+[SERVER_TPC_BLOCK.c] 127.0.0.1:57820: 0 1 1 2 3 5
+[SERVER_TPC_BLOCK.c] Sent response to 127.0.0.1:57820: ACK
+[SERVER_TPC_BLOCK.c] 127.0.0.1:57820: 0 1 1 2 3 5
+[SERVER_TPC_BLOCK.c] Sent response to 127.0.0.1:57820: ACK
+Il Client si e' disconnesso!
+\end{lstlisting}
+\FloatBarrier
+
+\begin{lstlisting}[style=output,caption={Output client - ./client 5 3}]
+[CLIENT.c] Sequenza di fibonacci: 0 1 1 2 3 5
+[CLIENT.c] 0.0.0.0:8080: ACK
+[CLIENT.c] 0.0.0.0:8080: ACK
+[CLIENT.c] 0.0.0.0:8080: ACK
+\end{lstlisting}
+\FloatBarrier
+
+% ============================================================
+\section{Server TCP Non Bloccante}
+
+\subsection{Obbiettivo}
+Il server TCP non bloccante riceve dal client una sequenza di Fibonacci sotto
+forma di stringa (es. \texttt{"0 1 1 2 3"}), legge il messaggio dalla socket,
+effettua il parsing convertendo ogni carattere nel corrispondente intero e
+ricostruisce la sequenza. Se la sequenza è corretta risponde con la stringa
+\texttt{ACK}, altrimenti con \texttt{NACK}.
+\newline
+A differenza del server bloccante, le chiamate \texttt{accept()} e \texttt{read()}
+non bloccano il processo: ritornano immediatamente con \texttt{EAGAIN} se non ci
+sono dati disponibili. Il processo continua a girare nel loop invece di dormire,
+realizzando una \textbf{attesa attiva} (busy-waiting).
+
+\subsection{server\_tcp\_nonblock.c}
+
+\subsubsection{Include e costanti}
+Rispetto al server bloccante aggiungo \texttt{errno.h} per leggere il codice
+di errore dopo le chiamate non bloccanti, e \texttt{fcntl.h} per la funzione
+\texttt{fcntl()} che imposta il flag \texttt{O\_NONBLOCK}.
+
+\begin{lstlisting}[caption={server\_tcp\_nonblock.c - Include}]
+#include "fibo.h"
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#define PORT 8080
+\end{lstlisting}
+\FloatBarrier
+
+\subsubsection{set\_nonblocking()}
+\texttt{fcntl()} legge prima i flag attuali del file descriptor con
+\texttt{F\_GETFL}, poi li riscrive aggiungendo \texttt{O\_NONBLOCK} con
+\texttt{F\_SETFL}. Da quel momento, qualsiasi chiamata bloccante su quel fd
+ritorna immediatamente con \texttt{errno = EAGAIN} se non ci sono dati.
+
+\begin{lstlisting}[caption={server\_tcp\_nonblock.c - set\_nonblocking()}]
+/*
+ * Imposta il flag O_NONBLOCK sul file descriptor fd tramite fcntl().
+ * Dopo questa chiamata, accept() e read() su fd ritornano subito con
+ * errno = EAGAIN invece di bloccare il processo in attesa di dati.
+ */
+static void set_nonblocking(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+\end{lstlisting}
+\FloatBarrier
+
+\subsubsection{parse\_msg}
+Identica al server bloccante: parsa la stringa ricevuta e popola la struttura
+\texttt{fibo\_sequence\_t}. I numeri sono separati da spazi e la conversione
+sfrutta la tabella ASCII (\texttt{'7' - '0' = 7}).
+
+\begin{lstlisting}[caption={server\_tcp\_nonblock.c - parse\_msg()}]
+void parse_msg(char *msg, fibo_sequence_t *fs) {
+  fibo_init(fs);
+
+  while (*msg != '\0') {
+    if (*msg == ' ' || *msg == '\n' || *msg == '\r') {
+      msg++;
+      continue;
+    }
+
+    int n = *msg - '0';
+    fibo_push(fs, n);
+
+    msg++;
+  }
+}
+\end{lstlisting}
+\FloatBarrier
+
+\subsubsection{Creazione del socket e O\_NONBLOCK}
+La creazione del socket è identica al server bloccante. La differenza è la
+chiamata a \texttt{set\_nonblocking(server\_fd)} prima del \texttt{bind()}: da
+quel momento \texttt{accept()} non dormirà mai, ma ritornerà immediatamente.
+
+\begin{lstlisting}[caption={server\_tcp\_nonblock.c - socket() e O\_NONBLOCK}]
+// SOCK_STREAM crea un socket TCP orientato alla connessione
+int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+if (server_fd == -1) {
+  perror("Errore nella creazione del socket");
+  exit(1);
+}
+
+// Evita "Address already in use" al riavvio: TCP tiene il socket
+// in TIME_WAIT per ~2 minuti dopo la chiusura
+int opt = 1;
+setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+// Rende il server fd non bloccante: accept() ritorna EAGAIN invece di
+// bloccare il processo quando non ci sono connessioni in arrivo
+set_nonblocking(server_fd);
+\end{lstlisting}
+\FloatBarrier
+
+\subsubsection{Loop esterno: accept() con attesa attiva}
+Il loop chiama \texttt{accept()} che ritorna subito. Se \texttt{client\_fd < 0}
+e \texttt{errno == EAGAIN} significa che non c'è nessun client in coda: il
+loop continua immediatamente senza dormire. Appena arriva una connessione,
+anche il \texttt{client\_fd} viene reso non bloccante con
+\texttt{set\_nonblocking()}.
+
+\begin{lstlisting}[caption={server\_tcp\_nonblock.c - accept() con attesa attiva}]
+// Loop esterno con attesa attiva: il processo non si blocca mai,
+// gira continuamente controllando se arriva una connessione
+while (1) {
+  int client_fd =
+      accept(server_fd, (struct sockaddr *)&client_addr, &addrlen);
+
+  if (client_fd < 0) {
+    if (errno == EWOULDBLOCK || errno == EAGAIN) {
+      // Nessuna connessione in arrivo: continua il loop senza bloccarsi
+      continue;
+    } else {
+      perror("Errore accept");
+      exit(1);
+    }
+  }
+
+  printf("[SERVER_TCP_NONBLOCK.c] Nuovo client connesso\n");
+
+  // Rende anche il client fd non bloccante: read() ritornera' EAGAIN
+  // invece di bloccare il processo quando non ci sono dati
+  set_nonblocking(client_fd);
+  // loop interno ...
+}
+\end{lstlisting}
+\FloatBarrier
+
+\subsubsection{Loop interno: read() con attesa attiva}
+\texttt{read()} ritorna immediatamente. Il valore di ritorno indica:
+\begin{itemize}
+    \item \texttt{n > 0}: bytes letti correttamente
+    \item \texttt{n == 0}: il client ha chiuso la connessione (EOF)
+    \item \texttt{n < 0} con \texttt{errno == EAGAIN}: nessun dato ora, riprova
+    \item \texttt{n < 0} altro errore: errore reale, chiudi la connessione
+\end{itemize}
+
+\begin{lstlisting}[caption={server\_tcp\_nonblock.c - read() con attesa attiva}]
+// Loop interno con attesa attiva: legge piu' messaggi dalla stessa
+// connessione finche' il client non si disconnette
+while (1) {
+  // read() ritorna subito: EAGAIN se non ci sono dati,
+  // 0 se il client ha chiuso la connessione (EOF)
+  ssize_t n = read(client_fd, buf, sizeof(buf) - 1);
+
+  if (n < 0) {
+    if (errno == EWOULDBLOCK || errno == EAGAIN) {
+      // Nessun dato disponibile ora: continua il loop senza bloccarsi
+      continue;
+    }
+    perror("Errore read");
+    break;
+  }
+
+  if (n == 0) {
+    printf("Il Client si e' disconnesso!\n");
+    close(client_fd);
+    break;
+  }
+
+  buf[n] = '\0'; // aggiunge terminatore per usare buf come stringa C
+  printf("[SERVER_TCP_NONBLOCK.c] %s:%d: %s", ip_str, port, buf);
+  // verifica fibonacci ...
+}
+\end{lstlisting}
+\FloatBarrier
+
+\subsubsection{Verifica Fibonacci e risposta}
+Identica al server bloccante: parsa la sequenza ricevuta, genera quella attesa
+e confronta. Invia \texttt{ACK} se corretta, \texttt{NACK} altrimenti.
+
+\begin{lstlisting}[caption={server\_tcp\_nonblock.c - verifica e risposta}]
+fibo_sequence_t fs, client_fs;
+memset(&fs, 0, sizeof(fibo_sequence_t));
+fibo_init(&fs);
+
+// Parsa la stringa ricevuta e genera la sequenza attesa
+parse_msg(buf, &client_fs);
+fibo_sequence(&fs, client_fs.idx - 1);
+
+if (fibo_compare(&fs, &client_fs) == 0) {
+  char *resp = "ACK\n";
+  write(client_fd, resp, strlen(resp));
+  printf("[SERVER_TCP_NONBLOCK.c] Sent response to %s:%d: %s", ip_str,
+         port, resp);
+} else {
+  char *resp = "NACK\n";
+  write(client_fd, resp, strlen(resp));
+  printf("[SERVER_TCP_NONBLOCK.c] Sent response to %s:%d: %s", ip_str,
+         port, resp);
+}
+// non chiudiamo: il client puo' inviare altri messaggi
+\end{lstlisting}
+\FloatBarrier
+
+\subsection{Limitazione: ancora un client alla volta}
+Nonostante le chiamate siano non bloccanti, il comportamento verso i client è
+identico al server bloccante: il loop interno gira su \texttt{read()} finché
+il client non si disconnette, e solo allora il loop esterno torna ad
+\texttt{accept()}. Il client B deve aspettare che il client A si disconnetta.
+\newline
+La differenza reale è che il processo non \textbf{dorme} mai: spende il 100\%
+della CPU girando nel loop invece di andare in sleep come farebbe il server
+bloccante. Questa tecnica, chiamata \textbf{attesa attiva} (busy-waiting), è
+più reattiva ma inefficiente in termini di consumo CPU.
+\newline
+È possibile verificarlo con \texttt{top} mentre entrambi i server sono in
+esecuzione senza client connessi:
+
+\begin{lstlisting}[style=output,caption={top -p \$(pgrep -f server\_tcp\_nonblock) - confronto CPU}]
+top -p $(pgrep -f server_tcp_block),$(pgrep -f server_tcp_nonblock)
+
+  PID USER  PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+216495 dff  20   0    2556   1460   1364 R  92.2   0.0  0:37.02 server_tcp_nonb
+217176 dff  20   0    2556   1460   1364 S   0.0   0.0  0:00.00 server_tcp_bloc
+\end{lstlisting}
+\FloatBarrier
+Il server non bloccante è nello stato \texttt{R} (Running) al 92\% di CPU,
+il server bloccante è nello stato \texttt{S} (Sleeping) allo 0\%: il kernel
+lo ha sospeso in attesa di una connessione.
+\newline
+
+\subsection{Output di esempio}
+
+\begin{lstlisting}[style=output,caption={Output server - due client sequenziali}]
+[SERVER_TCP_NONBLOCK.c] Server is listening...
+[SERVER_TCP_NONBLOCK.c] Nuovo client connesso
+[SERVER_TCP_NONBLOCK.c] 127.0.0.1:40360: 0 1 1 2 3 5
+[SERVER_TCP_NONBLOCK.c] Sent response to 127.0.0.1:40360: ACK
+[SERVER_TCP_NONBLOCK.c] 127.0.0.1:40360: 0 1 1 2 3 5
+[SERVER_TCP_NONBLOCK.c] Sent response to 127.0.0.1:40360: ACK
+[SERVER_TCP_NONBLOCK.c] 127.0.0.1:40360: 0 1 1 2 3 5
+[SERVER_TCP_NONBLOCK.c] Sent response to 127.0.0.1:40360: ACK
+Il Client si e' disconnesso!
+[SERVER_TCP_NONBLOCK.c] Nuovo client connesso
+[SERVER_TCP_NONBLOCK.c] 127.0.0.1:40372: 0 1 1 2 3 5
+[SERVER_TCP_NONBLOCK.c] Sent response to 127.0.0.1:40372: ACK
+Il Client si e' disconnesso!
+\end{lstlisting}
+\FloatBarrier
+
+\begin{lstlisting}[style=output,caption={Output client A - ./client 5 3}]
+[CLIENT.c] Sequenza di fibonacci: 0 1 1 2 3 5
+[CLIENT.c] 0.0.0.0:8080: ACK
+[CLIENT.c] 0.0.0.0:8080: ACK
+[CLIENT.c] 0.0.0.0:8080: ACK
+\end{lstlisting}
+\FloatBarrier
+
+\begin{lstlisting}[style=output,caption={Output client B - ./client 5 1}]
+[CLIENT.c] Sequenza di fibonacci: 0 1 1 2 3 5
+[CLIENT.c] 0.0.0.0:8080: ACK
+\end{lstlisting}
+\FloatBarrier
+
+
+\end{document}
