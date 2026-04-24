@@ -1,36 +1,38 @@
+#include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <arpa/inet.h>
 
 #define PORT 8080
 
-int main(void) {
-    int sockfd;
-    struct sockaddr_in addr;
+int main(int argc, char **argv) {
+  int sockfd;
+  struct sockaddr_in addr;
+  char *server_addr = "192.168.8.231";
 
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+  if (argv[1] != NULL) {
+    server_addr = argv[1];
+  }
 
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(PORT);
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+  sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
-    connect(sockfd, (struct sockaddr *)&addr, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(PORT);
+  inet_pton(AF_INET, (char *)server_addr, &addr.sin_addr);
 
-    char *messages[] = {
-        "Primo messaggio di testo",
-        "Secondo messaggio, piu lungo del primo",
-        "Terzo"
-    };
+  connect(sockfd, (struct sockaddr *)&addr, sizeof(addr));
 
-    for (int i = 0; i < 3; i++) {
-        /* BUG: send non garantisce di inviare tutti i byte, il
-               buffer di invio del kernel potrebbe essere pieno */
-        send(sockfd, messages[i], strlen(messages[i]), 0);
-        usleep(1000);
-    }
+  char *messages[] = {"Primo messaggio di testo",
+                      "Secondo messaggio, piu lungo del primo", "Terzo"};
 
-    close(sockfd);
-    return 0;
+  for (int i = 0; i < 3; i++) {
+    /* BUG: send non garantisce di inviare tutti i byte, il
+           buffer di invio del kernel potrebbe essere pieno */
+    send(sockfd, messages[i], strlen(messages[i]), 0);
+    usleep(1000);
+  }
+
+  close(sockfd);
+  return 0;
 }
