@@ -1,0 +1,329 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{placeins}
+
+\lstset{
+  language=C,
+  backgroundcolor=\color{lightgray!20},
+  frame=single,
+  breaklines=true,
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1,
+  numbersep=5pt,
+  captionpos=b,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{green!60!black},
+  stringstyle=\color{red},
+  showstringspaces=false,
+  float=H
+}
+
+\title{LabReSiD26 - Hands-On 2}
+\author{Davide Ferrara - 518629}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 1: Prova ad immaginare il funzionamento su rete reale}
+% ---------------------------------------------------------------------------
+
+\subsection{Dove si trova esattamente il problema della frammentazione nel client e nel server?}
+Il problema non è dato dal codice in sé ma dal fatto che tra Client e Server non è stabilito
+alcun protocollo di comunicazione. TCP è un protocollo che garantisce l'invio ordinato di un
+flusso di byte (stream-oriented), non esiste il concetto di messaggio in TCP.
+
+Dal manuale di TCP (\texttt{man 7 tcp}):
+
+\begin{quote}
+\textit{TCP guarantees that the data arrives in order and retransmits lost packets.
+It generates and checks a per-packet checksum to catch transmission errors.
+TCP does not preserve record boundaries.}
+\end{quote}
+
+\subsection{Perché avviene in trasmissione?}
+
+TCP può spezzare i dati in più segmenti per via del MSS (Maximum Segment Size),
+negoziato durante il 3-way handshake. Inoltre il Nagle's algorithm può raggruppare
+più \texttt{send()} in un unico segmento per ridurre l'overhead di rete.
+
+\subsection{Perché avviene in ricezione?}
+
+\texttt{recv()} restituisce quanti byte sono disponibili nel receive buffer del kernel
+in quel momento, senza aspettare un messaggio completo. Possono arrivare meno byte
+del previsto (segmento frammentato) o più byte del previsto (due \texttt{send()} fusi
+in un unico segmento).
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 2: Scrivi \texttt{recv\_all()}}
+% ---------------------------------------------------------------------------
+
+\begin{lstlisting}[caption={recv\_all() -- implementazione}]
+ssize_t recv_all(int sockfd, void *buf, size_t n) {
+  ssize_t r = 0;
+
+  /* cicla finche' non ha letto esattamente n byte */
+  while ((size_t)r < n) {
+    /* aritmetica di puntatori: (char*)buf + r sposta il cursore
+       sui byte gia' ricevuti; n-r e' quanto manca ancora */
+    ssize_t received = recv(sockfd, (char *)buf + r, n - r, 0);
+    if (received == -1) { /* errore di sistema */
+      perror("[ERROR] recv errore: ");
+      return -1;
+    }
+    if (received == 0) { /* peer ha chiuso la connessione (FIN) */
+      printf("[DEBUG] connessione chiusa!\n");
+      return 0;
+    }
+    r += received; /* aggiorna il cursore */
+  }
+
+  return n; /* restituisce n byte letti con successo */
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={send\_all() -- implementazione}]
+ssize_t send_all(int sockfd, void *buf, size_t n) {
+  ssize_t s = 0;
+
+  /* cicla finche' non ha inviato esattamente n byte */
+  while ((size_t)s < n) {
+    /* aritmetica di puntatori: (char*)buf + s sposta il cursore
+       sui byte gia' inviati; n-s e' quanto manca ancora */
+    ssize_t sent = send(sockfd, (char *)buf + s, n - s, 0);
+    if (sent == -1) { /* errore di sistema */
+      perror("[ERROR] send errore: ");
+      return -1;
+    }
+    if (sent == 0) { /* connessione chiusa */
+      printf("[DEBUG] connessione chiusa!\n");
+      return 0;
+    }
+    s += sent; /* aggiorna il cursore */
+  }
+
+  return n; /* restituisce n byte inviati con successo */
+}
+\end{lstlisting}
+
+L'implementazione di questa funzione non risolve il problema ugualmente perché i messaggi
+sono di lunghezza variabile, serve inviare anche questa informazione al server dal client.
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 3: Il problema della lunghezza}
+% ---------------------------------------------------------------------------
+
+\subsection{a) Il mittente deve mandare prima la lunghezza o prima il payload?}
+
+Il mittente deve mandare prima la lunghezza, così il ricevitore legge i 4 byte di header,
+conosce quanti byte aspettarsi e chiama \texttt{recv\_all()} con quella lunghezza esatta.
+
+\subsection{b) Dimensione massima di un singolo messaggio con \texttt{uint32\_t}}
+
+\texttt{uint32\_t} va da 0 a $2^{32}-1$, quindi la dimensione massima del payload è
+$2^{32}-1$ byte, circa 4 GB.
+
+\subsection{c) Perché è necessario usare \texttt{htonl()} sul campo lunghezza?}
+
+Macchine diverse potrebbero usare endianness diverse (little-endian su x86, big-endian su
+architetture a 64 bit). Il network byte order è big-endian per convenzione. Senza
+\texttt{htonl()}, un client little-endian invia i byte in ordine inverso e il server
+interpreta un numero completamente sbagliato.
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 4: Implementa il protocollo}
+% ---------------------------------------------------------------------------
+
+La struct \texttt{message} usata da client e server:
+
+\begin{lstlisting}[caption={Struttura message}]
+typedef struct message {
+  uint32_t len;
+  char *payload;
+} message;
+\end{lstlisting}
+
+Il mittente invia prima i 4 byte di lunghezza in network byte order (\texttt{htonl}),
+poi il payload. Il ricevitore legge i 4 byte, converte con \texttt{ntohl}, alloca
+esattamente \texttt{len+1} byte e chiama \texttt{recv\_all()} con quella lunghezza.
+
+\begin{lstlisting}[caption={send\_message() -- client}]
+int send_message(int sockfd, const message *msg) {
+  uint32_t net_len = htonl(msg->len);
+  if (send_all(sockfd, &net_len, sizeof(uint32_t)) < 0)
+    return -1;
+  if (send_all(sockfd, (void *)msg->payload, msg->len) < 0)
+    return -1;
+  return 0;
+}
+\end{lstlisting}
+
+Il ricevente legge i primi 4 byte, la lunghezza, e li converte in host long,
+alloca la memoria (len + 1) e termina la stringa.
+
+\begin{lstlisting}[caption={recv\_message() -- server}]
+int recv_message(int sockfd, message *msg) {
+  if (recv_all(sockfd, &msg->len, sizeof(uint32_t)) <= 0)
+    return -1;
+  msg->len = ntohl(msg->len);
+  msg->payload = (char *)malloc(sizeof(char) * msg->len + 1);
+  if (recv_all(sockfd, msg->payload, msg->len) <= 0)
+    return -1;
+  msg->payload[msg->len] = '\0';
+  return 0;
+}
+\end{lstlisting}
+
+\textbf{Output} Con un messaggio piccolo \texttt{"Ciao col protocollo!"} (20 byte):
+
+\begin{lstlisting}[caption={Output -- messaggio piccolo}, language={}]
+[DEBUG] Lunghezza divina_commedia.txt: 64000 bytes
+[CLIENT.c] Inviando: Ciao col protocollo!
+[DEBUG] r=4
+[DEBUG] r=20
+\end{lstlisting}
+
+I \texttt{[DEBUG] r=4} e \texttt{r=20} confermano che \texttt{send\_all()} trasmette prima
+i 4 byte di header, poi i 20 byte di payload.
+
+\textbf{Test con messaggio da 64 KB} Il client invia un testo della \textit{Divina Commedia}
+(64\,000 byte) in un singolo messaggio. Il server riceve correttamente l'intero payload
+grazie a \texttt{recv\_all()} che cicla fino a leggere esattamente \texttt{len} byte:
+
+\begin{lstlisting}[caption={Output server -- payload 64 KB}, language={}]
+Rispuosemi: "Non omo, omo gia' fui,
+e li parenti miei furon lombardi,
+mantoani per patria ambedui.
+[...]
+[DEBUG] connessione chiusa!
+\end{lstlisting}
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 5: Aggiungi il checksum}
+% ---------------------------------------------------------------------------
+
+Il checksum XOR viene calcolato su tutti i byte del payload prima dell'invio e verificato
+dal server dopo la ricezione. Il formato del messaggio diventa:
+
+\begin{center}
+\texttt{| len (4 byte) | payload (len byte) | checksum (1 byte) |}
+\end{center}
+
+La struct \texttt{message} viene estesa con il campo \texttt{checksum}:
+
+\begin{lstlisting}[caption={Struct message con checksum}]
+typedef struct message {
+  uint32_t len;
+  char *payload;
+  uint8_t checksum;
+} message;
+\end{lstlisting}
+
+\newpage
+Il checksum viene calcolato come lo XOR di tutti i caratteri del payload.
+\begin{lstlisting}[caption={Calcolo checksum XOR}]
+uint8_t checksum(char *payload) {
+  uint8_t checksum = 0;
+  for (size_t i = 0; i < strlen(payload); i++) {
+    checksum ^= (uint8_t)payload[i];
+  }
+  return checksum;
+}
+\end{lstlisting}
+
+Il client calcola il checksum in \texttt{create\_message()} e lo invia come ultimo byte
+dopo il payload in \texttt{send\_message()}:
+
+\begin{lstlisting}[caption={Invio checksum -- client}]
+/* In create_message(): */
+msg->checksum = checksum(msg->payload);
+
+/* In send_message(): */
+printf("[CLIENT.c] Checksum inviato: %d\n", msg->checksum);
+if (send_all(sockfd, (void *)&msg->checksum, sizeof(uint8_t)) < 0)
+  return -1;
+\end{lstlisting}
+
+Il server riceve il byte di checksum, calcola il proprio e confronta:
+
+\begin{lstlisting}[caption={Verifica checksum -- server}]
+if (recv_all(sockfd, &msg->checksum, sizeof(uint8_t)) <= 0)
+  return -1;
+
+uint8_t computed = checksum(msg->payload);
+printf("[SERVER.c] Checksum ricevuto: %d | Checksum calcolato: %d\n",
+       msg->checksum, computed);
+
+if (!(checksum(msg->payload) && msg->checksum)) {
+  printf("[DEBUG] Checksum fallito!\n");
+  return -1;
+}
+printf("[DEBUG] Checksum corretto, il messaggio e' integro!\n");
+\end{lstlisting}
+
+Il server tronca il payload stampato a 64 caratteri per leggibilità
+(stampare 64KB di divina commedia nel terminal sarebbe impossibile),
+il checksum controlla comunque la validità del messaggio.
+
+\begin{lstlisting}[caption={Troncamento output -- server}]
+if (strlen(msg->payload) > 64) {
+  msg->payload[61] = '.';
+  msg->payload[62] = '.';
+  msg->payload[63] = '.';
+  msg->payload[64] = '\0';
+}
+\end{lstlisting}
+
+\textbf{Output con file da 64\,000 byte} (\textit{Divina Commedia}):
+
+\begin{lstlisting}[caption={Output -- checksum su 64 KB}, language={}]
+[DEBUG] r=4
+[DEBUG] r=64000
+[DEBUG.c] len: 64000
+[DEBUG] r=1
+[SERVER.c] Checksum ricevuto: 54 | Checksum calcolato: 54
+[DEBUG] Checksum corretto, il messaggio e' integro!
+[SERVER.c] Messaggio: Nel mezzo del cammin di nostra vita
+mi ritrovai per una selva...
+\end{lstlisting}
+
+\texttt{r=4} riceve il campo lunghezza, \texttt{r=64000} l'intero payload,
+\texttt{r=1} il byte di checksum. I valori \texttt{54} coincidono: il messaggio
+è arrivato integro.
+
+% ---------------------------------------------------------------------------
+\section{Domande di riflessione}
+% ---------------------------------------------------------------------------
+
+\subsection*{Q1. Perché il codice funzionava in locale ma può fallire su rete reale?}
+
+In loopback il kernel consegna i dati in un unico chunk mentre nella rete reale TCP
+può spezzarli.
+
+\subsection*{Q2. Differenza tra \texttt{recv()} che ritorna 0 e \texttt{recv()} che ritorna -1}
+
+\texttt{recv()} ritorna 0 se il client ha effettuato uno shutdown in ordine (FIN ricevuto).
+\texttt{recv()} ritorna -1 nel caso di errori come una chiusura improvvisa della connessione.
+
+\subsection*{Q3. Dimensione massima del payload con \texttt{uint16\_t} nel campo lunghezza}
+
+\texttt{uint16\_t} corrisponde a un intero senza segno da 16 bit quindi max =
+$2^{16}-1 = 65535$ byte di payload.
+
+\subsection*{Q4. Il protocollo è adatto a trasferire file binari?}
+
+Il protocollo in generale sì, ma non nel mio codice perché nel checksum uso
+\texttt{strlen()}, che si ferma al primo byte \texttt{0x00}. I file binari contengono
+null byte essendo una sequenza di 0 e 1, quindi il checksum sarebbe errato.
+Anche la struttura \textbf{message} non sarebbe adatta per via del buffer di
+tipo char*.
+
+\end{document}
