@@ -1,0 +1,438 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{placeins}
+
+\lstset{
+  language=C,
+  backgroundcolor=\color{lightgray!20},
+  frame=single,
+  breaklines=true,
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1,
+  numbersep=5pt,
+  captionpos=b,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{green!60!black},
+  stringstyle=\color{red},
+  showstringspaces=false,
+  float=H
+}
+
+\title{LabReSiD26 - Hands-On 3}
+\author{Davide Ferrara - 518629}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 1: Identifica i problemi nel codice di partenza}
+% ---------------------------------------------------------------------------
+
+\subsection{1. Cosa succede se l'utente lancia \texttt{./sniffer} senza argomenti?}
+
+La seguente linea converte il nome dell'interfaccia in indice numerico.
+Lo stesso indice è visualizzabile col comando \texttt{ip a}:
+
+\begin{lstlisting}
+  /* Recupera l'indice numerico dell'interfaccia */
+  unsigned int ifindex = if_nametoindex(iface);
+\end{lstlisting}
+
+Nel caso in cui ifindex fosse \textbf{null} il programma al momento della
+chiamata di \texttt{if\_nametoindex(NULL)} andrebbe in Segmentation fault
+in quanto proverebbe ad accedere un'area di memoria di cui non dispone i permessi.
+
+\begin{lstlisting}[language={}]
+  sudo ./sniffer
+  [sudo] password for dff:
+  [SNIFFER.c] Sniffing su (null)...
+  Segmentation fault
+\end{lstlisting}
+
+È importante controllare anche il valore di ritorno di \texttt{if\_nametoindex()},
+che ritorna 0 in caso di errore.
+Se non si controlla, viene passato 0 a \texttt{bind()}, che in
+\texttt{AF\_PACKET} interpreta l'indice 0 come ``tutte le interfacce'': il programma non
+crasha ma sniffa silenziosamente su tutte le interfacce invece di fallire.
+
+\begin{lstlisting}[language={}]
+ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+2: enp8s0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc fq_codel state DOWN group default qlen 1000
+    link/ether 74:56:3c:c7:5e:5d brd ff:ff:ff:ff:ff:ff
+4: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default qlen 1000
+    link/ether bc:c7:46:9b:2e:fe brd ff:ff:ff:ff:ff:ff
+    inet 192.168.8.230/24 metric 600 brd 192.168.8.255 scope global dynamic wlan0
+\end{lstlisting}
+
+Nel mio caso l'indice di wlan0 (la scheda wifi) corrisponde a indice 4.
+
+Senza il controllo su \texttt{ifindex}, come si puo notare snifferei su tutte le 
+interfacce:
+
+\begin{lstlisting}[language={}]
+sudo ./sniffer foo
+[SNIFFER.c] Sniffing su foo...
+[SNIFFER.c] Indice interfaccia 0
+^C
+\end{lstlisting}
+
+Con il controllo invece esco dal programma:
+
+\begin{lstlisting}[language={}]
+sudo ./sniffer foo
+[SNIFFER.c] Sniffing su foo...
+Errore: interfaccia 'foo' non trovata
+\end{lstlisting}
+
+\subsection{2. Perché controllare il valore di ritorno di \texttt{socket()} e \texttt{bind()}?}
+
+Van controllate per evitare che il programma continui con un file descriptor 
+non valido, causando comportamenti indefiniti alla chiamata di
+(\texttt{bind()}, \texttt{recvfrom()}).
+
+Esempi di errori di \textbf{\texttt{socket()}} che ho riscontato sono durante
+la scrittura del programma sono:
+
+\begin{itemize}
+  \item \texttt{EPERM}: il processo non ha i privilegi necessari (serve \texttt{sudo} o
+        la capability \texttt{cap\_net\_raw}).
+\end{itemize}
+
+\texttt{cap\_net\_raw} è una Linux capability che permette di aprire raw socket senza
+essere root. Invece di eseguire l'intero programma con \texttt{sudo}, si assegna solo
+questo privilegio specifico al binario:
+
+\begin{lstlisting}[language={}, caption={Assegnare cap\_net\_raw al binario}]
+sudo setcap cap_net_raw+ep ./sniffer
+./sniffer wlan0   # funziona senza sudo
+\end{lstlisting}
+
+Le capability assegnate al binario sono salvate come extended attribute
+(\texttt{security.capability}) sull'inode del file e leggibili con \texttt{getcap}:
+
+\begin{lstlisting}[language={}, caption={Lettura capability con getcap}]
+getcap ./sniffer
+./sniffer cap_net_raw=ep
+\end{lstlisting}
+
+Gli errori invece riscontrati con bind():
+
+\begin{itemize}
+  \item \texttt{ENODEV}: l'indice di interfaccia passato non corrisponde a nessun dispositivo.
+\end{itemize}
+
+Il codice qui sotto effettua il controllo di socket() e bind() e su EPERM
+stampo un messaggio personalizzato.
+\begin{lstlisting}[caption={Controllo socket() e bind()}]
+int sock = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+if (sock == -1) {
+  if (errno == EPERM)
+    fprintf(stderr, "Errore: esegui con sudo o cap_net_raw\n");
+  else
+    perror("socket");
+  exit(EXIT_FAILURE);
+}
+
+if (bind(sock, (struct sockaddr *)&sll, sizeof(sll)) == -1) {
+  perror("bind");
+  close(sock);
+  exit(EXIT_FAILURE);
+}
+\end{lstlisting}
+
+\subsection{3. Perché \texttt{eth->h\_proto} stampato direttamente dà un valore sbagliato su x86?}
+
+Il campo \texttt{h\_proto} arriva dalla rete in \textbf{big-endian} (byte più significativo
+per primo): IPv4 è \texttt{0x0800}, cioè i byte sul cavo sono \texttt{[0x08, 0x00]}.
+
+x86 è \textbf{little-endian}: il processore legge il byte all'indirizzo più basso come
+il meno significativo. Quindi \texttt{[0x08, 0x00]} viene interpretato come
+\texttt{0x0008} = 8, invece del corretto \texttt{0x0800} = 2048.
+
+\texttt{ntohs()} (\textit{network to host short}) esegue il byte-swap necessario:
+
+\begin{lstlisting}[caption={Senza e con conversione}]
+/* SBAGLIATO: stampa 8 invece di 2048 */
+printf("  EtherType: 0x%04X\n", eth->h_proto);
+
+/* CORRETTO: ntohs() swappa i byte e stampa 2048 */
+printf("  EtherType: 0x%04X\n", ntohs(eth->h_proto));
+\end{lstlisting}
+
+\subsection{4. Cosa succede se si omette la \texttt{bind()}?}
+
+Dal manuale di \texttt{bind(2)}:
+
+\begin{quote}
+\textit{When a socket is created with socket(2), it exists in a name space
+(address family) but has no address assigned to it. bind() assigns the address
+specified by addr to the socket referred to by the file descriptor sockfd.
+Traditionally, this operation is called "assigning a name to a socket".}
+\end{quote}
+
+Senza \texttt{bind()}, il socket \texttt{AF\_PACKET} non è associato ad alcuna interfaccia
+e riceve frame da \textbf{tutte le interfacce} attive sul sistema. Con \texttt{bind()}
+il kernel consegna solo i frame dell'interfaccia specificata.
+
+Nella prova pratica la differenza non è evidente perché ricevo frame solo
+su wlan0 mentre \texttt{enp8s0} è in stato \texttt{DOWN} e non genera frame. 
+Su un sistema con più interfacce attive simultaneamente (es.\ \texttt{eth0}
+e \texttt{wlan0}), senza \texttt{bind()} si vedrebbero frame da entrambe, mischiati e
+indistinguibili.
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 2: Aggiungi la gestione degli errori}
+% ---------------------------------------------------------------------------
+
+La gestione degli errori è stata già implementata durante l'analisi
+dell'Esercizio 1.
+Il codice risultante è riportato di seguito per completezza.
+
+\begin{lstlisting}[caption={Gestione errori -- sniffer.c}]
+/* Controlla argc */
+if (argc < 2) {
+  fprintf(stderr, "Uso: %s <interfaccia> [arp|ipv4|ipv6]\n", argv[0]);
+  exit(EXIT_FAILURE);
+}
+const char *iface = argv[1];
+
+/* Apre il raw socket */
+int sock = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+if (sock == -1) {
+  if (errno == EPERM)
+    fprintf(stderr, "Errore: esegui con sudo o cap_net_raw\n");
+  else
+    perror("socket");
+  exit(EXIT_FAILURE);
+}
+
+...
+
+/* Recupera l'indice dell'interfaccia */
+unsigned int ifindex = if_nametoindex(iface);
+if (ifindex == 0) {
+  perror("if_nametoindex");
+  close(sock);
+  exit(EXIT_FAILURE);
+}
+
+...
+
+if (bind(sock, (struct sockaddr *)&sll, sizeof(sll)) == -1) {
+  perror("bind");
+  close(sock);
+  exit(EXIT_FAILURE);
+}
+\end{lstlisting}
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 3: Decodifica l'EtherType}
+% ---------------------------------------------------------------------------
+
+La funzione \texttt{ethertype\_name()} riceve il valore \texttt{proto} già convertito in
+host byte order (dopo \texttt{ntohs()}) e restituisce la stringa corrispondente al protocollo.
+Riconosce IPv4, ARP e IPv6; per qualsiasi altro valore restituisce \texttt{"sconosciuto"}.
+
+Invece dei magic number si usano le costanti simboliche definite in
+\texttt{<net/ethernet.h>}, già disponibili in host byte order:
+
+\begin{lstlisting}[caption={Costanti EtherType da net/ethernet.h (estratto)}]
+#ifndef ETHERTYPE_IP
+#define ETHERTYPE_IP   0x0800  /* IP protocol */
+#endif
+#ifndef ETHERTYPE_ARP
+#define ETHERTYPE_ARP  0x0806  /* Addr. resolution protocol */
+#endif
+#ifndef ETHERTYPE_IPV6
+#define ETHERTYPE_IPV6 0x86dd
+#endif
+\end{lstlisting}
+
+Uso semplicemente uno switch case per i vari casi:
+\begin{lstlisting}[caption={ethertype\_name() -- implementazione con costanti simboliche}]
+const char *ethertype_name(uint16_t proto) {
+  switch (proto) {
+  case ETHERTYPE_IP:
+    return "IPv4";
+  case ETHERTYPE_ARP:
+    return "ARP";
+  case ETHERTYPE_IPV6:
+    return "IPv6";
+  default:
+    return "sconosciuto";
+  }
+}
+\end{lstlisting}
+
+Nel loop del programma:
+\begin{lstlisting}[caption={Uso nel loop di stampa}]
+uint16_t proto = ntohs(eth->h_proto);
+const char *name = ethertype_name(proto);
+printf("  EtherType: %d %s\n", proto, name);
+\end{lstlisting}
+
+Esempio di Output:
+\begin{lstlisting}[language={}, caption={Output -- Es.3}]
+Frame #1  (139 byte)
+  DST: BC:C7:46:9B:2E:FE
+  SRC: 94:83:C4:72:F8:D1
+  EtherType: 2048 IPv4
+Frame #2  (66 byte)
+  DST: 94:83:C4:72:F8:D1
+  SRC: BC:C7:46:9B:2E:FE
+  EtherType: 2048 IPv4
+\end{lstlisting}
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 4: Statistiche e interruzione pulita}
+% ---------------------------------------------------------------------------
+
+Alla ricezione di \texttt{SIGINT} (Ctrl+C), l'handler imposta \texttt{running = 0}
+interrompendo il loop. Dopo l'uscita dal loop si chiama \texttt{print\_stats()} che
+stampa i contatori per protocollo. Il controllo \texttt{if (running == 0)} dentro il
+loop permette di stampare le statistiche anche se l'interrupt arriva durante
+l'\texttt{elaborazione} del frame corrente (immagino debba finire l'esecuzione
+un thread? perché senno mi stampava prima le statistiche e successivamente
+altre informazioni sniffate, per questo ho fatto cosi).
+
+\begin{lstlisting}[caption={Variabili globali, handler e print\_stats()}]
+volatile int running = 1;
+unsigned long cnt_ipv4 = 0;
+unsigned long cnt_arp   = 0;
+unsigned long cnt_ipv6  = 0;
+unsigned long cnt_other = 0;
+
+void print_stats(void) {
+  printf("\nSNIFFING STATS: PROTOCOL | COUNT\n");
+  printf("                  IPv4     | %ld\n", cnt_ipv4);
+  printf("                  ARP      | %ld\n", cnt_arp);
+  printf("                  IPv6     | %ld\n", cnt_ipv6);
+  printf("                  Altri    | %ld\n", cnt_other);
+}
+
+void handle_sigint(int sig) {
+  (void)sig;
+  running = 0;
+}
+\end{lstlisting}
+
+I contatori vengono incrementati direttamente dentro \texttt{ethertype\_name()},
+nei rispettivi \texttt{case}: la funzione ha quindi un side effect oltre a restituire
+la stringa. Nel loop basta chiamare \texttt{ethertype\_name(proto)} e i contatori
+si aggiornano automaticamente.
+
+\begin{lstlisting}[caption={ethertype\_name() con side effect sui contatori}]
+const char *ethertype_name(uint16_t proto) {
+  switch (proto) {
+  case ETHERTYPE_IP:   cnt_ipv4++; return "IPv4";
+  case ETHERTYPE_ARP:  cnt_arp++;  return "ARP";
+  case ETHERTYPE_IPV6: cnt_ipv6++; return "IPv6";
+  default:             cnt_other++; return "sconociuto";
+  }
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Loop -- nessuno switch separato}]
+while (running) {
+  /* ... recvfrom e parsing ... */
+  uint16_t proto = ntohs(eth->h_proto);
+  const char *name = ethertype_name(proto); /* incrementa contatore */
+  printf("  EtherType: %d %s\n", proto, name);
+
+  if (running == 0)
+    print_stats();
+}
+\end{lstlisting}
+
+Esempio di Output:
+\begin{lstlisting}[language={}, caption={Output -- Ctrl+C dopo 5 frame}]
+sudo ./sniffer wlan0
+[SNIFFER.c] Sniffing su wlan0...
+[SNIFFER.c] Indice interfaccia 4
+Frame #1  (139 byte)
+  DST: BC:C7:46:9B:2E:FE
+  SRC: 94:83:C4:72:F8:D1
+  EtherType: 2048 IPv4
+Frame #2  (66 byte)
+  DST: 94:83:C4:72:F8:D1
+  SRC: BC:C7:46:9B:2E:FE
+  EtherType: 2048 IPv4
+^CFrame #5  (139 byte)
+  DST: BC:C7:46:9B:2E:FE
+  SRC: 94:83:C4:72:F8:D1
+  EtherType: 2048 IPv4
+
+SNIFFING STATS: PROTOCOL | COUNT
+                  IPv4     | 5
+                  ARP      | 0
+                  IPv6     | 0
+                  Altri    | 0
+\end{lstlisting}
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 5: Filtraggio da riga di comando}
+% ---------------------------------------------------------------------------
+
+Il secondo argomento è opzionale. \texttt{filter} è una variabile \texttt{uint16\_t}
+inizializzata a 0 prima del loop: con \texttt{filter = 0} il loop non salta nessun frame
+(nessun filtro attivo). Se \texttt{argv[2]} è presente, viene convertito nella costante
+EtherType corrispondente una sola volta prima del loop.
+
+Nel loop basta una riga: se \texttt{filter != 0} e il protocollo del frame non corrisponde,
+il frame viene scartato con \texttt{continue}.
+
+\begin{lstlisting}[caption={Parsing del filtro da argv[2] -- prima del loop}]
+uint16_t filter = 0; /* 0 = nessun filtro */
+if (argc == 3) {
+  if      (strcmp(argv[2], "ipv4") == 0) filter = ETHERTYPE_IP;
+  else if (strcmp(argv[2], "arp")  == 0) filter = ETHERTYPE_ARP;
+  else if (strcmp(argv[2], "ipv6") == 0) filter = ETHERTYPE_IPV6;
+  else {
+    fprintf(stderr, "Protocollo non supportato: %s\n", argv[2]);
+    close(sock);
+    exit(EXIT_FAILURE);
+  }
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Applicazione filtro nel loop}]
+uint16_t proto = ntohs(eth->h_proto);
+if (filter != 0 && proto != filter) continue;
+\end{lstlisting}
+
+% ---------------------------------------------------------------------------
+\section{Domande di approfondimento}
+% ---------------------------------------------------------------------------
+
+\subsection*{Q1. Differenza tra \texttt{SOCK\_RAW} e \texttt{SOCK\_DGRAM} con \texttt{AF\_PACKET}}
+
+Con \texttt{SOCK\_RAW} il kernel consegna l'intero frame Ethernet così come viaggia sul
+cavo, header MAC incluso. È il livello usato dagli sniffer come Wireshark 
+che scende a questo livello tramite libpcap.
+
+Con \texttt{SOCK\_DGRAM} il kernel rimuove l'header Ethernet prima della consegna,
+fornendo solo il payload. \texttt{SOCK\_DGRAM} è adatto a messaggi brevi senza
+connessione (es.\ server DNS) dove ordine e affidabilità non sono garantiti.
+Nel contesto di un sniffer non sarebbe utile, senza header Ethernet non si vedrebbero
+i MAC address né l'EtherType.
+
+\subsection*{Q2. Comportamento senza \texttt{bind()}}
+
+Senza \texttt{bind()}, il socket riceve frame da tutte le interfacce con traffico attivo,
+non solo da quella passata come argomento.
+
+Non sono riuscito ad effettuare la prova pratica poiché l'unica interfaccia
+collegata alla rete che ho attualmente è la wlan0 mentre eth0 è DOWN come
+mostrato nell'output del comando "ip a" sopra citato.
+
+\end{document}

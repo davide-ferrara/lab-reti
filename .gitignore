@@ -1,0 +1,15 @@
+*.zip
+
+# LaTeX build artifacts
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.synctex.gz
+
+# compiled binaries
+ho*/sniffer
+ho*/client
+ho*/server
+ho*/client_broken
+ho*/server_broken
