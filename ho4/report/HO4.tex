@@ -1,0 +1,203 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{placeins}
+
+\lstset{
+  language=C,
+  backgroundcolor=\color{lightgray!20},
+  frame=single,
+  breaklines=true,
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1,
+  numbersep=5pt,
+  captionpos=b,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{green!60!black},
+  stringstyle=\color{red},
+  showstringspaces=false,
+  float=H
+}
+
+\title{LabReSiD26 - Hands-On 4}
+\author{Davide Ferrara - 518629}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 1: Stampa leggibile del protocollo}
+% ---------------------------------------------------------------------------
+
+Il campo \texttt{ip->protocol} contiene il numero di protocollo del livello di trasporto
+incapsulato nel pacchetto IP. Nel codice di partenza veniva stampato come numero intero
+con \texttt{\%d}. La funzione \texttt{proto\_name()} converte il numero in una stringa
+leggibile tramite uno switch case che matcha il numero del protocollo e ritorna la stringa
+corrispondente:
+
+\begin{lstlisting}[caption={proto\_name() -- implementazione}]
+const char *proto_name(uint8_t protocol) {
+  switch (protocol) {
+  case 1:
+    return "ICMP";
+  case 6:
+    return "TCP";
+  case 17:
+    return "UDP";
+  default:
+    return "sconosciuto";
+  }
+}
+\end{lstlisting}
+
+La \texttt{printf} è stata modificata per usare \texttt{proto\_name()} al posto di
+\texttt{\%d}, mantenendo il numero tra parentesi per completezza:
+
+\begin{lstlisting}[caption={Uso nel loop di stampa}]
+printf("  PROTO: %s (%d)\n", proto_name(ip->protocol), ip->protocol);
+\end{lstlisting}
+
+\begin{lstlisting}[language={}, caption={Output}]
+  PROTO: ICMP (1)
+\end{lstlisting}
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 2: Decodifica completa dell'header IP}
+% ---------------------------------------------------------------------------
+
+Ho esteso il programma per stampare tutti i campi significativi dell'header IP.
+È importante segnalare che se \texttt{ip->ihl < 5} il pacchetto viene scartato
+con \texttt{continue} nel ciclo, in quanto un valore inferiore a 5 indica un
+header malformato (la lunghezza minima valida è $5 \times 4 = 20$ byte).
+
+Il campo \texttt{frag\_off} è un \texttt{uint16\_t} che comprime tre informazioni:
+
+\begin{center}
+\texttt{| bit 15 (riservato) | bit 14 (DF) | bit 13 (MF) | bit 12--0 (offset) |}
+\end{center}
+
+\begin{itemize}
+  \item \textbf{DF} (Don't Fragment, bit 14): il pacchetto non deve essere frammentato.
+  \item \textbf{MF} (More Fragments, bit 13): esistono altri frammenti successivi.
+  \item \textbf{Fragment Offset} (bit 12--0, 13 bit): posizione del frammento in unità da 8 byte.
+\end{itemize}
+
+Si estraggono con operazioni bitwise dopo aver convertito \texttt{frag\_off} in host byte
+order con \texttt{ntohs()}:
+
+\begin{lstlisting}[caption={Estrazione flag e offset da frag\_off}]
+uint16_t fo = ntohs(ip->frag_off);
+int flag_df = (fo >> 14) & 1; /* sposta bit 14 in pos. 0, prendi solo quello */
+int flag_mf = (fo >> 13) & 1; /* stesso per bit 13 */
+int offset  =  fo & 0x1FFF;   /* maschera i 13 bit bassi */
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Decodifica completa header IP}]
+if (ip->ihl < 5) {
+  printf("[SNIFFER.c] Pacchetto malformato\n");
+  continue;
+}
+
+uint16_t tot_len = ntohs(ip->tot_len);
+int len = ip->ihl * 4;
+uint16_t fo = ntohs(ip->frag_off);
+int flag_df = (fo >> 14) & 1; /* Don't Fragment */
+int flag_mf = (fo >> 13) & 1; /* More Fragments */
+int offset  =  fo & 0x1FFF;   /* Fragment Offset (in unita' da 8 byte) */
+
+printf("  VERSION: %d\n",    ip->version);
+printf("  IHL: %d byte\n",   len);
+printf("  LUNGHEZZA: %d byte\n", tot_len);
+printf("  TTL: %d\n",        ip->ttl);
+printf("  PROTO: %s (%d)\n", proto_name(ip->protocol), ip->protocol);
+printf("  SRC: %s\n",        inet_ntoa(s));
+printf("  DST: %s\n",        inet_ntoa(d));
+printf("  FLAGS: %s%s\n",    flag_df ? "DF " : "", flag_mf ? "MF" : "");
+printf("  FRAG OFF: %d\n\n", fo);
+\end{lstlisting}
+
+\begin{lstlisting}[language={}, caption={Output -- ping -c 3 8.8.8.8}]
+sudo ./sniffer
+In ascolto (solo ICMP)... premi Ctrl+C per uscire
+
+Pacchetto #1  (84 byte)
+  VERSION: 4
+  IHL: 20 byte
+  LUNGHEZZA: 84 byte
+  TTL: 116
+  PROTO: ICMP (1)
+  SRC: 8.8.8.8
+  DST: 192.168.8.230
+  FLAGS:
+  FRAG OFF: 0
+\end{lstlisting}
+
+\texttt{FLAGS} è vuoto e \texttt{FRAG OFF: 0} perché il pacchetto non è frammentato
+e il flag DF non è settato nella risposta di \texttt{8.8.8.8}.
+
+% ---------------------------------------------------------------------------
+\section{Challenge: Naviga nel payload -- decodifica l'header ICMP}
+% ---------------------------------------------------------------------------
+
+La funzione \texttt{ip\_payload()} calcola il puntatore all'inizio del payload IP
+tenendo conto delle eventuali opzioni (\texttt{ihl > 5}) ed esegue due controlli
+di sicurezza prima di restituire il puntatore:
+
+\begin{itemize}
+  \item \texttt{ip->ihl < 5}: header malformato, lunghezza impossibile.
+  \item \texttt{n < hlen}: pacchetto troncato — \texttt{recvfrom()} ha consegnato
+        meno byte di quanti l'header dichiara. Su IP non esiste ritrasmissione,
+        il pacchetto va scartato.
+\end{itemize}
+
+\begin{lstlisting}[caption={ip\_payload() -- implementazione}]
+unsigned char *ip_payload(const unsigned char *buf, ssize_t n,
+                          size_t *payload_len) {
+  struct iphdr *ip = (struct iphdr *)buf;
+  if (ip->ihl < 5)
+    return NULL; /* malformato */
+  int hlen = ip->ihl * 4;
+  if (n < hlen)  /* se n < hlen e accedo a buf+hlen vado in segfault */
+    return NULL; /* troncato: in IP non esiste ritrasmissione, lo scarto */
+  *payload_len = n - hlen;
+  return (unsigned char *)buf + hlen;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Uso nel loop -- decodifica header ICMP}]
+size_t payload_len;
+unsigned char *payload = ip_payload(buf, n, &payload_len);
+if (payload == NULL)
+  continue;
+
+printf("  PAYLOAD:\n");
+if (ip->protocol == 1) {
+  struct icmphdr *icmp = (struct icmphdr *)payload;
+  printf("  TYPE:     %d\n",  icmp->type);
+  printf("  CODE:     %d\n",  icmp->code);
+  printf("  CHECKSUM: %d\n",  ntohs(icmp->checksum));
+  printf("  ID:       %d\n",  ntohs(icmp->un.echo.id));
+  printf("  SEQ:      %d\n\n", ntohs(icmp->un.echo.sequence));
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language={}, caption={Output -- ICMP Echo Reply da 8.8.8.8}]
+  PAYLOAD:
+  TYPE: 0
+  ID: 1423
+  SEQ: 256
+\end{lstlisting}
+
+\texttt{TYPE: 0} corrisponde a Echo Reply — la risposta al ping. Per vedere
+\texttt{TYPE: 8} (Echo Request) sarebbe necessario catturare i pacchetti in uscita,
+ma con \texttt{AF\_INET + SOCK\_RAW} il kernel consegna solo i pacchetti in arrivo
+alla macchina locale.
+
+\end{document}
