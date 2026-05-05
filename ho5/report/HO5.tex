@@ -1,0 +1,138 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{placeins}
+
+\lstset{
+  language=C,
+  backgroundcolor=\color{lightgray!20},
+  frame=single,
+  breaklines=true,
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1,
+  numbersep=5pt,
+  captionpos=b,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{green!60!black},
+  stringstyle=\color{red},
+  showstringspaces=false,
+  float=H
+}
+
+\title{LabReSiD26 -- Hands-On 5}
+\author{Davide Ferrara -- 518629}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 1: Analisi di \texttt{server\_select.c}}
+% ---------------------------------------------------------------------------
+
+\subsection*{Domanda 1 -- Differenza tra \texttt{server\_fd} e \texttt{client\_fd}}
+
+\textbf{server\_fd} è il socket di ascolto,
+il suo unico scopo è ricevere le richieste di connesione.
+Quando \texttt{select()} segnala che \texttt{server\_fd} è pronto,
+significa che un nuovo client vuole connettersi --- si chiama \texttt{accept()}.
+
+Il socket di connessione (\texttt{client\_fd}) viene creato da \texttt{accept()} ogni volta
+che un client si connette. È il canale dedicato a quella specifica connessione: su di esso
+si usano \texttt{recv()} e \texttt{send()}. Ne esiste uno per ogni client connesso
+contemporaneamente.
+
+\subsection*{Domanda 2 -- Perché \texttt{client\_fds[]} inizializzato a \texttt{-1} e non \texttt{0}}
+
+I file descriptor partono da 0: \texttt{fd=0} è \texttt{stdin}, un fd valido.
+Inizializzare \texttt{client\_fds[]} a \texttt{0} avrebbe due conseguenze errate:
+\begin{itemize}
+  \item Ogni slot risulterebbe già occupato (\texttt{client\_fds[i] != -1} sarebbe vero),
+        impedendo l'inserimento di qualsiasi client reale, come dimostrato 
+        dal seguente output:
+        \begin{lstlisting}
+>>> troppi client, rifiuto fd=4
+        \end{lstlisting}
+  \item \texttt{FD\_SET(0, \&read\_set)} aggiungerebbe \texttt{stdin} al set monitorato da
+        \texttt{select()}, producendo notifiche spurie ogni volta che l'utente scrive da
+        tastiera.
+\end{itemize}
+Con \texttt{-1} nessun fd reale assume mai quel valore, quindi ogni slot con
+\texttt{client\_fds[i] == -1} è libero.
+
+\subsection*{Domanda 3 -- Perché \texttt{max\_fd} parte da \texttt{server\_fd} e non da \texttt{0}}
+
+\texttt{select(nfds, ...)} monitora i file descriptor da 0 fino a \texttt{nfds-1}.
+Il primo argomento deve quindi essere il fd più grande tra quelli monitorati, più uno.
+All'avvio l'unico fd presente è \texttt{server\_fd} (nel nostro caso \texttt{fd=3}),
+quindi \texttt{max\_fd = server\_fd} e la chiamata diventa \texttt{select(4, ...)}.
+
+Se si inizializzasse \texttt{max\_fd = 0}, la chiamata diventerebbe \texttt{select(1, ...)}:
+il kernel scandisce il range \texttt{[0, 0]}, ovvero solo \texttt{fd=0} (stdin), e ignora completamente
+\texttt{server\_fd=3}. Il server si bloccherebbe su \texttt{select()} indefinitamente
+anche se un client tenta di connettersi come verificato sperimentalmente, in cui
+il server non produce alcun output nonostante le connessioni in arrivo.
+
+\subsection*{Domanda 4 -- Perché \texttt{FD\_ZERO} e \texttt{FD\_SET} ad ogni iterazione}
+
+\texttt{select()} sovrascrive il set in input lasciando solo i fd pronti in quel ciclo.
+Per non perdere gli fd non serviti, il set va ricostruito ad ogni iterazione usando
+\texttt{client\_fds[]} come rubrica di verità.
+
+\subsection*{Domanda 5 -- Disconnessione del secondo client}
+
+Il server non crasha. Quando \texttt{recv()} ritorna 0 (connessione chiusa dal client),
+il server chiude il fd con \texttt{close()}, imposta lo slot a \texttt{-1} liberandolo,
+e ricalcola \texttt{max\_fd} scorrendo tutta la rubrica.
+Gli altri client continuano a funzionare normalmente.
+
+Output osservato (tre client connessi, terzo disconnesso con CTRL+C):
+\begin{lstlisting}
+[+] nuovo client connesso  fd=4
+[+] nuovo client connesso  fd=5
+[+] nuovo client connesso  fd=6
+[-] client disconnesso (fd=6)
+[fd=4] messaggio: "ciao" (4 byte)
+[fd=5] messaggio: "ciao" (4 byte)
+\end{lstlisting}
+
+\subsection*{Domanda 6 -- \texttt{select()} può ritornare con \texttt{n > 1}}
+
+Sì, \texttt{select()} può ritornare con \texttt{n > 1} quando più fd diventano pronti
+nello stesso istante. Lo script \texttt{test\_multifd.sh 5} lo dimostra: apre 5 connessioni,
+attende 1 secondo, poi tutti e 5 i client inviano il messaggio contemporaneamente.
+L'output mostra prima 5 cicli con \texttt{n=1} (una connessione alla volta) e poi un ciclo
+con \texttt{n=5} (tutti i messaggi arrivano insieme):
+
+\begin{lstlisting}
+>>> select() ritorna: 1 fd pronti   // client 1 si connette
+>>> select() ritorna: 1 fd pronti   // client 2 si connette
+>>> select() ritorna: 1 fd pronti   // client 3 si connette
+>>> select() ritorna: 1 fd pronti   // client 4 si connette
+>>> select() ritorna: 1 fd pronti   // client 5 si connette
+>>> select() ritorna: 5 fd pronti   // tutti mandano insieme
+[fd=4] messaggio: "messaggio dal client 1" (22 byte)
+[fd=5] messaggio: "messaggio dal client 2" (22 byte)
+[fd=6] messaggio: "messaggio dal client 3" (22 byte)
+[fd=7] messaggio: "messaggio dal client 4" (22 byte)
+[fd=8] messaggio: "messaggio dal client 5" (22 byte)
+\end{lstlisting}
+
+Il valore di ritorno di \texttt{select()} dipende quindi da quanti fd sono pronti
+al momento della chiamata, non è sempre 1.
+
+Con \texttt{./test\_multifd.sh 20} il server smette di accettare connessioni oltre la
+decima: i client dall'undicesimo in poi vengono rifiutati con il messaggio
+\texttt{[!] troppi client}.
+Questo non è un problema di \texttt{select()}, ma un limite della struttura dati:
+\texttt{MAX\_CLIENTS = 10} fissa la capacità massima della rubrica \texttt{client\_fds[]}.
+I fd oltre \texttt{fd=13} (i primi 10 slot occupano fd 4--13) vengono chiusi immediatamente
+dopo \texttt{accept()}.
+
+\end{document}

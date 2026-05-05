@@ -187,17 +187,12 @@ if (ip->protocol == 1) {
   printf("  SEQ:      %d\n\n", ntohs(icmp->un.echo.sequence));
 }
 \end{lstlisting}
-
+\newpage
 \begin{lstlisting}[language={}, caption={Output -- ICMP Echo Reply da 8.8.8.8}]
   PAYLOAD:
   TYPE: 0
   ID: 1423
   SEQ: 256
 \end{lstlisting}
-
-\texttt{TYPE: 0} corrisponde a Echo Reply — la risposta al ping. Per vedere
-\texttt{TYPE: 8} (Echo Request) sarebbe necessario catturare i pacchetti in uscita,
-ma con \texttt{AF\_INET + SOCK\_RAW} il kernel consegna solo i pacchetti in arrivo
-alla macchina locale.
 
 \end{document}
