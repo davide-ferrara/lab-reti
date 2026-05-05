@@ -1,0 +1,63 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{placeins}
+
+\lstset{
+  language=C,
+  backgroundcolor=\color{lightgray!20},
+  frame=single,
+  breaklines=true,
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1,
+  numbersep=5pt,
+  captionpos=b,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{green!60!black},
+  stringstyle=\color{red},
+  showstringspaces=false,
+  float=H
+}
+
+\title{LabReSiD26 -- Hands-On 6}
+\author{Davide Ferrara -- 518629}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 1: Analisi di \texttt{server\_epoll.c}}
+% ---------------------------------------------------------------------------
+
+\subsection*{Domanda 1 -- Differenza strutturale tra \texttt{server\_epoll.c} e \texttt{server\_select\_demo.c}}
+
+% TODO
+
+\subsection*{Domanda 2 -- Dove sono finiti \texttt{client\_fds[]} e \texttt{max\_fd}}
+
+% TODO
+
+\subsection*{Domanda 3 -- \texttt{epoll\_wait()} ritorna con \texttt{N > 1}}
+
+% TODO
+
+\subsection*{Domanda 4 -- \texttt{epoll\_ctl(DEL)} prima o dopo \texttt{close(fd)}}
+
+% TODO
+
+\subsection*{Domanda 5 -- \texttt{epoll\_create1()} chiamato una volta sola}
+
+% TODO
+
+\subsection*{Domanda 6 -- Confronto riga di compilazione: \texttt{epoll} vs \texttt{io\_uring}}
+
+% TODO
+
+\end{document}
