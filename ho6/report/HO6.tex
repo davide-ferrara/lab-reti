@@ -5,6 +5,8 @@
 \usepackage{xcolor}
 \usepackage{float}
 \usepackage{placeins}
+\usepackage{url}
+\setlength{\emergencystretch}{3em}
 
 \lstset{
   language=C,
@@ -20,8 +22,7 @@
   keywordstyle=\color{blue}\bfseries,
   commentstyle=\color{green!60!black},
   stringstyle=\color{red},
-  showstringspaces=false,
-  float=H
+  showstringspaces=false
 }
 
 \title{LabReSiD26 -- Hands-On 6}
@@ -38,26 +39,156 @@
 
 \subsection*{Domanda 1 -- Differenza strutturale tra \texttt{server\_epoll.c} e \texttt{server\_select\_demo.c}}
 
-% TODO
+La differenza strutturale più evidente è l'eliminazione della rubrica \texttt{client\_fds[]},
+di \texttt{max\_fd} e della ricostruzione del set ad ogni ciclo con
+\texttt{FD\_ZERO}/\texttt{FD\_SET}. In \texttt{server\_select\_demo.c} il programma
+deve mantenere queste strutture manualmente; in \texttt{server\_epoll\_demo.c} è il
+kernel a tracciare i fd registrati tramite il suo albero rosso-nero interno.
+\texttt{max\_fd} non è più necessario perché \texttt{epoll\_wait()} non scansiona un
+range di fd: restituisce direttamente i soli fd pronti nell'array
+\texttt{events[]}.
+
+\medskip
+\noindent\textbf{Prima (select):}
+\begin{lstlisting}
+/* rubrica da mantenere manualmente */
+int client_fds[MAX_CLIENTS];
+for (int i = 0; i < MAX_CLIENTS; i++) client_fds[i] = -1;
+int max_fd = server_fd;
+
+/* ad ogni iterazione si ricostruisce il set */
+fd_set read_set;
+FD_ZERO(&read_set);
+FD_SET(server_fd, &read_set);
+for (int i = 0; i < MAX_CLIENTS; i++)
+    if (client_fds[i] != -1) FD_SET(client_fds[i], &read_set);
+int n = select(max_fd + 1, &read_set, NULL, NULL, NULL);
+\end{lstlisting}
+
+\noindent\textbf{Dopo (epoll):}
+\begin{lstlisting}
+/* nessuna rubrica, nessun max_fd */
+int epfd = epoll_create1(0);
+struct epoll_event events[MAX_EVENTS];
+
+/* ad ogni iterazione: epoll_wait restituisce solo i fd pronti */
+int n = epoll_wait(epfd, events, MAX_EVENTS, -1);
+for (int i = 0; i < n; i++) {
+    int fd = events[i].data.fd;
+}
+\end{lstlisting}
 
 \subsection*{Domanda 2 -- Dove sono finiti \texttt{client\_fds[]} e \texttt{max\_fd}}
 
-% TODO
+Entrambe le strutture spariscono dal codice utente. Se ne occupa il kernel: ogni
+\texttt{epoll\_ctl(EPOLL\_CTL\_ADD, fd, ...)} inserisce il fd nell'albero rosso-nero
+interno dell'istanza epoll.
+
+\texttt{epoll\_wait()} si limita a copiare i fd pronti nell'array \texttt{events[]}
+ con costo O(eventi pronti).
+
+\texttt{max\_fd} non esiste più perché \texttt{epoll\_wait()} non riceve un range di fd
+da scansionare ma conosce già i fd registrati tramite l'albero rosso-nero e consegna
+direttamente ciò che è pronto.
 
 \subsection*{Domanda 3 -- \texttt{epoll\_wait()} ritorna con \texttt{N > 1}}
 
-% TODO
+Dal manuale:
+
+\begin{verbatim}
+  On success, epoll_wait() returns the number of file
+  descriptors ready for the requested I/O operation,
+  or zero if no file descriptor became ready
+  during the requested timeout milliseconds.
+\end{verbatim}
+
+\texttt{epoll\_wait()} può quindi ritornare con \texttt{n > 1} quando più fd diventano
+pronti prima che il server torni a chiamarlo. Nel caso dello script fornito
+per aumentare la probabilità che due o più client si sovrappongano è necessario
+diminuire il delay tramite il secondo parametro dello script:
+
+\begin{lstlisting}
+./test_multifd.sh 10 0
+\end{lstlisting}
+
+Con delay=0 le connessioni avvengono immediatamente e con un numero alto di client
+aumenta la probabilità che più eventi si accodino nella ready list prima della prossima
+chiamata a \texttt{epoll\_wait()}, ottenendo \texttt{n > 1}.
 
 \subsection*{Domanda 4 -- \texttt{epoll\_ctl(DEL)} prima o dopo \texttt{close(fd)}}
 
-% TODO
+\texttt{epoll\_ctl(DEL)} va chiamato \textbf{prima} di \texttt{close(fd)}. Dal kernel
+2.6.9 la rimozione esplicita è diventata opzionale (il kernel rimuove automaticamente
+il fd alla chiusura), ma l'ordine corretto resta DEL poi close per due motivi.
+
+\textbf{Gestione degli errori.} Dal manuale: \textit{``When successful, epoll\_ctl()
+returns zero. When an error occurs, epoll\_ctl() returns -1 and errno is set to
+indicate the error.''} Se si chiude prima il fd, questo non è più valido: una
+successiva \texttt{epoll\_ctl(DEL)} fallirebbe con \texttt{EBADF} (Bad File
+Descriptr) e non sarebbe possibile gestire l'errore.
+
+\textbf{Rischio di fd reuse.} Alla \texttt{close()}, il kernel libera immediatamente
+il numero di fd. Un altro thread o la stessa \texttt{accept()} potrebbe ricevere
+quel numero come nuovo fd. Chiamare \texttt{epoll\_ctl(DEL, fd)} dopo rimuoverebbe
+il fd \emph{nuovo} dall'istanza epoll, non quello vecchio, causando un comportamento
+indefinito silenzioso senza alcun errore visibile.
+
+L'ordine corretto è quindi:
+\begin{lstlisting}
+epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+close(fd);
+\end{lstlisting}
 
 \subsection*{Domanda 5 -- \texttt{epoll\_create1()} chiamato una volta sola}
 
-% TODO
+\texttt{epoll\_create1()} crea un'istanza epoll nel kernel e restituisce un file
+descriptor che la rappresenta (\texttt{epfd}). Chiamarlo ad ogni iterazione del loop
+causa tre problemi.
+
+\textbf{File descriptor leak.} Ogni chiamata apre un nuovo \texttt{epfd} senza che
+il precedente venga mai chiuso. Il kernel mantiene allocati albero rosso-nero e ready
+list per ogni istanza: iterando abbastanza a lungo si esauriscono i fd disponibili
+del processo (solitamente 1024 massimi per processo).
+
+\begin{lstlisting}
+ulimit -n
+1024 /* Numero massimo di FD nel mio sistema*/
+\end{lstlisting}
+
+\textbf{Memoria kernel non liberata.} Le strutture interne di ogni istanza epoll
+(albero rosso-nero + ready list) rimangono allocate fino alla \texttt{close(epfd)}.
+Con un nuovo \texttt{epfd} ad ogni ciclo e nessuna chiusura, la memoria kernel cresce
+senza limite causando possibili OOM.
+
+\textbf{Perdita delle registrazioni.} Ogni nuova istanza parte vuota: tutti i client
+già connessi e registrati con \texttt{epoll\_ctl(EPOLL\_CTL\_ADD)} spariscono. Il server
+perderebbe traccia di tutte le connessioni attive ad ogni iterazione.
 
 \subsection*{Domanda 6 -- Confronto riga di compilazione: \texttt{epoll} vs \texttt{io\_uring}}
 
-% TODO
+Un programma che usa \texttt{io\_uring} tramite l'API ad alto livello richiede
+\textbf{liburing} (\texttt{-luring}), la libreria userspace di Jens Axboe.
+
+Un esempio reale verificato è \textbf{QEMU}: il suo \texttt{meson.build}\footnote{\url{https://github.com/qemu/qemu/blob/master/meson.build}} dichiara
+esplicitamente la dipendenza da liburing tramite pkg-config:
+
+\begin{verbatim}[meson.build]
+linux_io_uring = dependency('liburing', version: '>=0.3',
+                            required: get_option('linux_io_uring'),
+                            method: 'pkg-config')
+\end{verbatim}
+
+Questo produce in compilazione il flag \texttt{-luring}.
+
+\medskip
+\noindent Confronto righe di compilazione:
+
+\begin{lstlisting}[language=bash]
+# server_epoll.c con nessuna libreria esterna
+gcc -Wall -O2 -o server_epoll server_epoll.c
+
+# programma con link di uring
+gcc -Wall -O2 -o server_uring server_uring.c -luring
+\end{lstlisting}
 
 \end{document}
