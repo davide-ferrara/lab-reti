@@ -1,0 +1,213 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{placeins}
+\usepackage{amssymb}
+\setlength{\emergencystretch}{3em}
+
+\lstset{
+  language=C,
+  backgroundcolor=\color{lightgray!20},
+  frame=single,
+  breaklines=true,
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1,
+  numbersep=5pt,
+  captionpos=b,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{green!60!black},
+  stringstyle=\color{red},
+  showstringspaces=false
+}
+
+\title{LabReSiD26 -- Hands-On 7}
+\author{Davide Ferrara -- 518629}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 1: Osserva il comportamento base}
+% ---------------------------------------------------------------------------
+
+\subsection*{Domanda 1 -- Quanti receiver ricevono il messaggio e perché TCP unicast non lo permetterebbe}
+
+Eseguendo tre receiver all'interno di Tmux in tre terminali diversi e inviando un
+messaggio tramite sender, si può notare che tutti i receiver ricevono il messaggio.
+Con TCP unicast questo non sarebbe possibile perché con esso si stabilisce una
+connessione 1-a-1 e non 1-a-N come nel caso del multicast: il sender dovrebbe aprire
+N connessioni separate, una per ogni receiver, e inviare il messaggio N volte.
+Con multicast è sufficiente una sola \texttt{sendto()} — il kernel e la rete si
+occupano della distribuzione.
+
+\subsection*{Domanda 2 -- MAC di destinazione catturato con tcpdump per 239.0.0.1}
+
+Output catturato con \texttt{sudo tcpdump -i enp8s0 udp port 5000 -e}:
+
+\begin{lstlisting}
+13:21:03.385919 74:56:3c:c7:5e:5d (oui Unknown) > 01:00:5e:00:00:01 (oui Unknown),
+ethertype IPv4 (0x0800), length 60:
+dave.lan.48598 > 239.0.0.1.commplex-main: UDP, length 5
+\end{lstlisting}
+
+Il MAC di destinazione \texttt{01:00:5e:00:00:01} corrisponde con quello atteso.
+Applicando la formula \texttt{01:00:5e:XX:XX:XX}: gli ultimi 23 bit di \texttt{239.0.0.1}
+(\texttt{EF|00|00|01}) sono \texttt{0x000001}, quindi il MAC risultante è
+\texttt{01:00:5e:00:00:01}.
+
+\subsection*{Domanda 3 -- Nuovo MAC di destinazione con gruppo 239.1.2.3}
+
+Modificando \texttt{MCAST\_GROUP} in \texttt{239.1.2.3} in sender.c e receiver.c,
+ricompilando e catturando con tcpdump:
+
+\begin{lstlisting}
+13:31:45.237811 74:56:3c:c7:5e:5d (oui Unknown) > 01:00:5e:01:02:03 (oui Unknown),
+ethertype IPv4 (0x0800), length 60:
+dave.lan.50275 > 239.1.2.3.commplex-main: UDP, length 5
+\end{lstlisting}
+
+Il nuovo MAC di destinazione è \texttt{01:00:5e:01:02:03}. Gli ultimi 23 bit di
+\texttt{239.1.2.3} corrispondono agli utlimi 3 ottetti di \texttt{MCAST\_GROUP}.
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 2: TTL e loopback}
+% ---------------------------------------------------------------------------
+
+\subsection*{Domanda 1 -- Cosa succede con \texttt{ttl = 0} e perché}
+
+Con \texttt{ttl = 0}, \texttt{sendto()} ritorna successo e il sender stampa
+\textit{Inviato (x byte)...}, ma il pacchetto non raggiunge nessuna interfaccia fisica:
+il kernel lo scarta al livello IP prima che venga consegnato al driver di rete e
+\texttt{tcpdump} sull'interfaccia fisica non cattura nulla.
+
+La differenza tra i due valori è definita qui sotto:
+
+\begin{itemize}
+  \item \textbf{TTL = 0} — scope host-local: il pacchetto non esce dalla macchina.
+        Il kernel lo sopprime prima che raggiunga qualsiasi interfaccia di rete.
+        Nessun altro host lo riceve.
+  \item \textbf{TTL = 1} — scope link-local: il pacchetto esce sull'interfaccia
+        di rete ma non viene instradato oltre il primo hop. Raggiunge tutti gli
+        host sulla stessa LAN iscritti al gruppo, ma nessun router lo forwarda.
+\end{itemize}
+
+\newpage
+\subsection*{Domanda 2 -- Effetto di \texttt{IP\_MULTICAST\_LOOP = 0} sulla stessa macchina e su macchina diversa}
+
+Con \texttt{loop = 0} il kernel non consegna una copia del pacchetto UDP ai socket
+locali iscritti al gruppo. Effetto nei due scenari:
+
+\begin{itemize}
+  \item \textbf{Stessa macchina:} il receiver non riceve nulla. \texttt{IP\_MULTICAST\_LOOP}
+        sopprime la copia locale prima che venga messa nella coda del socket.
+  \item \textbf{Macchina diversa nella stessa LAN:} il receiver riceve normalmente.
+        L'opzione non influenza il pacchetto che esce sull'interfaccia fisica: questo
+        viene inviato sulla rete con TTL=1 e raggiunge tutti gli host della LAN
+        iscritti al gruppo.
+\end{itemize}
+
+\subsection*{Domanda 3 -- Differenza tra \texttt{IP\_MULTICAST\_TTL} e
+\texttt{IP\_MULTICAST\_LOOP}}
+
+Dal manuale:
+
+\begin{verbatim}
+IP_MULTICAST_TTL: Set or read the time-to-live value of
+outgoing multicast packets for this socket. The default is
+1 which means that multicast packets don't leave the local
+network unless the user program explicitly requests it.
+
+IP_MULTICAST_LOOP: Set or read a boolean integer argument
+that determines whether sent multicast packets should be
+looped back to the local sockets.
+\end{verbatim}
+
+\textbf{IP\_MULTICAST\_TTL} controlla quanti router il pacchetto può attraversare
+sulla rete. Con TTL=1 (default) resta nella LAN locale. Con TTL=0 il kernel sopprime
+il pacchetto silenziosamente prima di consegnarlo al driver di rete: \texttt{sendto()} ritorna
+successo ma nessun frame esce sull'interfaccia fisica.
+
+\textbf{IP\_MULTICAST\_LOOP} controlla se il kernel consegna una copia del pacchetto
+ai socket locali prima che esca sulla rete. Non influenza l'uscita del pacchetto
+sull'interfaccia fisica: con \texttt{loop = 0} il pacchetto viene comunque inviato
+sulla rete, ma nessun socket locale lo riceve.
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 3: Costruisci una chat multicast}
+% ---------------------------------------------------------------------------
+
+\subsection*{Passo A -- Un solo socket per inviare e ricevere}
+
+\texttt{chat.c} è costruito a partire dalla struttura di \texttt{receiver.c}
+(\texttt{bind()} + \texttt{IP\_ADD\_MEMBERSHIP}), viene utilizzato
+lo stesso scoket sia per recvfrom() che per sendto()
+
+\subsection*{Passo B -- Il problema del blocco}
+
+Mettendo \texttt{fgets()} e \texttt{recvfrom()} in sequenza nel loop:
+
+\begin{lstlisting}
+while (1) {
+    fgets(buf, sizeof(buf), stdin);    /* blocca finche' l'utente scrive */
+    sendto(...);
+    recvfrom(sockfd, buf, ...);        /* blocca finche' arriva un pacchetto */
+    printf(...);
+}
+\end{lstlisting}
+
+Il programma si blocca su \texttt{fgets()} finché l'utente non scrive, e non può
+ricevere messaggi dalla rete nel frattempo. Simmetricamente, mentre aspetta su
+\texttt{recvfrom()} non può leggere da tastiera. Le due operazioni bloccanti in
+sequenza rendono il programma inutilizzabile come chat.
+
+\subsection*{Passo C -- \texttt{select()} come soluzione}
+
+Con \texttt{select()} su \texttt{STDIN\_FILENO} e \texttt{sockfd} ad ogni
+iterazione il kernel segnala quale dei due fd è pronto e solo quello 
+viene servito:
+
+\begin{lstlisting}
+while (1) {
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(STDIN_FILENO, &readfds);
+    FD_SET(sockfd, &readfds);
+    select(sockfd + 1, &readfds, NULL, NULL, NULL);
+
+    if (FD_ISSET(STDIN_FILENO, &readfds)) { /* tastiera pronta: invia */ }
+    if (FD_ISSET(sockfd, &readfds))        { /* rete pronta: ricevi  */ }
+}
+\end{lstlisting}
+
+Invio e ricezione funzionano contemporaneamente senza bloccarsi.
+
+\subsection*{Passo D -- Il proprio messaggio torna indietro}
+
+Per filtrare i propri messaggi è stato adottato
+il metodo a): il payload viene prefissato con \texttt{[username]} e alla ricezione
+si controlla se il messaggio inizia con il proprio prefisso:
+
+\begin{lstlisting}
+/* invio */
+snprintf(buf, sizeof(buf), "[%s] %s", username, input);
+sendto(sockfd, buf, strlen(buf), 0, (struct sockaddr *)&local, sizeof(local));
+
+/* ricezione */
+char own_prefix[BUFLEN];
+snprintf(own_prefix, sizeof(own_prefix), "[%s]", username);
+if (strncmp(buf, own_prefix, strlen(own_prefix)) == 0)
+    continue;
+\end{lstlisting}
+
+La differenza rispetto a \texttt{IP\_MULTICAST\_LOOP = 0}, in questo caso si
+filtra in userspace dopo la ricezione, quindi i propri messaggi arrivano comunque al
+socket ma vengono scartati.
+
+\end{document}
