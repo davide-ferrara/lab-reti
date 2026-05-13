@@ -1,0 +1,249 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{placeins}
+\usepackage{url}
+\setlength{\emergencystretch}{3em}
+
+\lstset{
+  language=C,
+  backgroundcolor=\color{lightgray!20},
+  frame=single,
+  breaklines=true,
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1,
+  numbersep=5pt,
+  captionpos=b,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{green!60!black},
+  stringstyle=\color{red},
+  showstringspaces=false
+}
+
+\title{LabReSiD26 -- Hands-On 12}
+\author{Davide Ferrara -- 518629}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 1: La shell base}
+% ---------------------------------------------------------------------------
+
+L'esercizio richiede di implementare un ciclo \emph{read-fork-exec-wait}:
+leggere un comando da \texttt{stdin}, fare \texttt{fork()}, eseguire il
+programma nel figlio con \texttt{execvp()} e aspettarne la terminazione nel
+padre con \texttt{waitpid()}.
+
+\subsection*{Prompt e lettura}
+
+Il prompt viene stampato con \texttt{printf} seguito da \texttt{fflush(stdout)}:
+\texttt{printf} usa un buffer \emph{line-buffered} e, poiché \texttt{"minish> "}
+non termina con \texttt{'\textbackslash n'}, senza \texttt{fflush} il testo
+resterebbe nel buffer e non apparirebbe sullo schermo prima che il programma
+si blocchi su \texttt{fgets()}.
+
+Il built-in \texttt{exit} viene gestito \textbf{prima} di \texttt{fork()}: se
+venisse controllato nel figlio, sarebbe il figlio a uscire e non la shell.
+
+\subsection*{Figlio: \texttt{execvp} e padre: \texttt{waitpid}}
+
+\texttt{execvp(argv[0], argv)} sostituisce l'immagine del processo con il
+programma richiesto cercandolo nel \texttt{PATH}. Se ha successo non ritorna
+mai: il codice dopo è raggiungibile solo in caso di errore, dove si termina
+con \texttt{exit(127)} (convenzione POSIX per \emph{command not found}).
+Il padre chiama \texttt{waitpid(pid, \&status, 0)} e decodifica il risultato
+con le macro \texttt{WIFEXITED}/\texttt{WEXITSTATUS} e
+\texttt{WIFSIGNALED}/\texttt{WTERMSIG}.
+
+\begin{lstlisting}[caption={Figlio ed padre -- parti cruciali}]
+if (pid == 0) {
+    /* execvp non ritorna mai in caso di successo.
+     * exit(127): convenzione POSIX per "command not found". */
+    if (execvp(argv[0], argv) == -1) {
+        perror(argv[0]);
+        exit(127);
+    }
+} else {
+    /* waitpid(pid,...) aspetta il figlio specifico. */
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status))
+        printf("[Exit %d]\n", WEXITSTATUS(status));
+    if (WIFSIGNALED(status))
+        printf("[Signal %d]\n", WTERMSIG(status));
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash, caption={Test Esercizio 1}]
+$ ./minish_es1
+minish> ls -l
+total 472
+-rwxr-xr-x 1 dff dff  15784 May 13 crash
+-rw-r--r-- 1 dff dff     63 May 13 crash.c
+-rwxr-xr-x 1 dff dff  16600 May 13 minish_es1
+minish> echo ciao mondo
+ciao mondo
+minish> comando_inesistente
+comando_inesistente: No such file or directory
+[Exit 127]
+minish> exit
+\end{lstlisting}
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 2: Zombie, segnali e \texttt{cd}}
+% ---------------------------------------------------------------------------
+
+L'esercizio estende la shell con tre funzionalità: esecuzione in background
+con \texttt{\&}, raccolta asincrona dei figli tramite \texttt{SIGCHLD} e il
+built-in \texttt{cd}.
+
+\subsection*{Comandi in background con \texttt{\&}}
+
+Se l'ultimo token della riga è \texttt{\&}, si rimuove da \texttt{argv},
+si stampa il PID del figlio e si torna al loop senza chiamare
+\texttt{waitpid()}.
+
+\begin{lstlisting}[caption={Rilevazione background e handler SIGCHLD}]
+/* Il loop e' necessario: i segnali dello stesso tipo non si accodano,
+ * un singolo SIGCHLD puo' rappresentare N terminazioni. */
+static void sigchld_handler(int sig) {
+    (void)sig;
+    while (waitpid(-1, NULL, WNOHANG) > 0)
+        ;
+}
+
+/* In main, prima del loop: */
+signal(SIGCHLD, &sigchld_handler);
+
+/* Rilevazione &: */
+int bg = argc > 0 && !strcmp(argv[argc - 1], "&");
+if (bg)
+    argv[--argc] = NULL;
+
+/* Nel padre: */
+if (bg) { printf("[1] %d\n", pid); continue; }
+\end{lstlisting}
+
+\subsection*{Raccolta asincrona con \texttt{SIGCHLD}}
+
+Quando un figlio in background termina, il kernel manda \texttt{SIGCHLD} al
+padre. L'handler chiama \texttt{waitpid(-1, NULL, WNOHANG)} in un loop per
+raccogliere tutti i figli terminati, evitando i processi zombie.
+
+\medskip
+\noindent\textbf{Senza handler} -- zombie accumulati:
+\begin{lstlisting}[language=bash]
+dff   73704  S+  ./minish
+dff   73731  Z+  [sleep] <defunct>
+dff   73783  Z+  [sleep] <defunct>
+...  (15 zombie)
+\end{lstlisting}
+
+\noindent\textbf{Con handler} -- nessun zombie:
+\begin{lstlisting}[language=bash]
+dff   72437  S+  ./minish
+dff   73119  S+  grep -E minish|defunct
+\end{lstlisting}
+
+\subsection*{Built-in \texttt{cd}}
+
+\texttt{chdir()} modifica la directory corrente del processo che la chiama.
+Se lo facessimo in un figlio, solo la directory del figlio cambierebbe; la
+shell rimarrebbe nella directory di partenza. Per questo \texttt{cd} viene
+gestito prima della \texttt{fork()}, con \texttt{continue} per saltarla.
+Senza argomenti va in \texttt{\$HOME}.
+
+\begin{lstlisting}[caption={Built-in cd}]
+if (!strcmp(argv[0], "cd")) {
+    if (argc == 1) {
+        const char *home = getenv("HOME");
+        if (!home) { fprintf(stderr, "cd: HOME non impostata\n"); continue; }
+        if (chdir(home) < 0) perror("cd");
+    } else {
+        if (chdir(argv[1]) < 0) perror("cd");
+    }
+    continue; /* non fare fork */
+}
+\end{lstlisting}
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 3: La pipe}
+% ---------------------------------------------------------------------------
+
+L'esercizio estende la shell per supportare \texttt{cmd1 | cmd2}: i due
+comandi vengono eseguiti in due processi figli collegati da una pipe del kernel.
+
+\subsection*{Rilevazione di \texttt{|} e split di \texttt{argv[]}}
+
+Si scorre \texttt{argv[]} finché non si trova \texttt{"|"}: si imposta
+\texttt{argv[i] = NULL} per terminare il vettore sinistro e si salva
+\texttt{argv\_right = \&argv[i+1]} come puntatore al comando destro.
+
+\begin{lstlisting}[caption={Ricerca di | e pipeline}]
+char **argv_right = NULL;
+int i = 0;
+while (i < argc) {
+    if (!strcmp(argv[i], "|")) {
+        argv[i] = NULL;
+        argv_right = &argv[i + 1];
+        break;
+    }
+    i++;
+}
+
+if (argv_right != NULL) {
+    char **argv_left = argv;
+    int fd[2];
+    pipe(fd);
+
+    pid_t child1 = fork();
+    if (child1 == 0) {
+        /* stdout -> pipe: l'output va nel buffer invece che a schermo */
+        dup2(fd[1], STDOUT_FILENO);
+        close(fd[0]); close(fd[1]);
+        execvp(argv_left[0], argv_left);
+        exit(127);
+    }
+
+    pid_t child2 = fork();
+    if (child2 == 0) {
+        /* stdin <- pipe: il comando legge l'output di child1 */
+        dup2(fd[0], STDIN_FILENO);
+        close(fd[1]); close(fd[0]);
+        execvp(argv_right[0], argv_right);
+        exit(127);
+    }
+
+    /* Il padre chiude entrambi i capi: se non chiudesse fd[1],
+     * child2 non riceverebbe mai EOF e rimarrebbe bloccato. */
+    close(fd[0]); close(fd[1]);
+    waitpid(child1, NULL, 0);
+    waitpid(child2, NULL, 0);
+    continue;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash, caption={Test Esercizio 3 -- pipe}]
+minish> ls -1 | grep .c
+crash.c
+minish.c
+minish_es1.c
+minish_es2.c
+minish> cat /etc/passwd | grep root
+root:x:0:0::/root:/usr/bin/bash
+minish> echo uno due tre | wc -w
+3
+minish> ps aux | grep minish
+dff  110138  0.0  0.0  2752  1792 pts/3  S+  23:18  0:00 ./minish
+dff  111198  0.0  0.0  6676  4212 pts/3  S+  23:24  0:00 grep minish
+\end{lstlisting}
+
+\end{document}
