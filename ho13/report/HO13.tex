@@ -1,0 +1,195 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{placeins}
+\usepackage{url}
+\setlength{\emergencystretch}{3em}
+
+\lstset{
+  language=C,
+  backgroundcolor=\color{lightgray!20},
+  frame=single,
+  breaklines=true,
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1,
+  numbersep=5pt,
+  captionpos=b,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{green!60!black},
+  stringstyle=\color{red},
+  showstringspaces=false
+}
+
+\title{LabReSiD26 -- Hands-On 13}
+\author{Davide Ferrara -- 518629}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 1: Somma parallela di un array}
+% ---------------------------------------------------------------------------
+
+L'esercizio consiste nel dividere un array di $N = 1\,000\,000$ interi in
+$T = 4$ segmenti uguali, calcolare la somma parziale di ciascun segmento
+in un thread separato tramite \texttt{pthread\_create()}, raccogliere i
+risultati con \texttt{pthread\_join()} e verificare che la somma totale
+coincida con quella calcolata sequenzialmente.
+
+\subsection*{Struttura degli argomenti}
+
+Ogni thread riceve un puntatore a una struttura \texttt{worker\_args} che
+descrive il segmento di lavoro e dove scrivere il risultato parziale.
+Usare una struttura è necessario perché \texttt{pthread\_create()} accetta
+un unico argomento \texttt{void *}.
+
+\begin{lstlisting}[caption={Struttura argomento thread e funzione job}]
+/* Struttura dati del worker*/
+typedef struct {
+  const int *array;
+  int from;
+  int to;
+  ssize_t result;
+} worker_args;
+
+/* Job del thread, fa il casting dell'args da void* in worker_args*
+ * in questo modo il programma sa come leggere la struttura in memoria.
+ * Uso la funziona gettid() per ottenere il thread id.
+ * Il thread chiama partial_sum() e salva il risultato nella struttura,
+ * il thread ritorna NULL.
+ * */
+static void job(void *args) {
+  worker_args *w = (worker_args *)args;
+  pid_t tid = gettid();
+
+  w->result = partial_sum(w->array, w->from, w->to);
+  printf("[SUM.c][Thread %d] Somma parziale: %lu\n", tid, w->result);
+
+  pthread_exit(NULL);
+}
+\end{lstlisting}
+
+\subsection*{Creazione e raccolta dei thread}
+
+I loop di creazione e raccolta sono separati: il primo lancia tutti i
+thread in parallelo, il secondo raccoglie i risultati con
+\texttt{pthread\_join()}.
+I segmenti dell'array sono disgiunti, quindi i thread non condividono
+mai dati in scrittura: non serve nessun meccanismo di sincronizzazione.
+\texttt{pthread\_join()} attende la terminazione del thread e raccoglie
+il valore restituito da \texttt{return} o \texttt{pthread\_exit()}.
+
+\begin{lstlisting}[caption={Loop di creazione e raccolta separati}]
+worker_args w[T] = {0};
+pthread_t tid[T];
+
+/* Stabilisco lo step per dividere l'array in base a T */
+int step = SIZE / T;
+int from = 0, to = step;
+
+/* Lancio tutti i thread in parallelo: segmenti disgiunti,
+ * nessuna sincronizzazione necessaria. */
+for (int i = 0; i < T; i++) {
+  w[i].array = a;
+  w[i].from = from;
+  w[i].to = to;
+  from = to;
+  to += step;
+  pthread_create(&tid[i], NULL, (void *)&job, (void *)&w[i]);
+}
+
+long long psum = 0;
+for (int i = 0; i < T; i++) {
+  if (pthread_join(tid[i], NULL) == 0)
+    psum += w[i].result;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash, caption={Test Esercizio 1}]
+$ ./sum
+[SUM.c] Somma sequenziale: 49500000
+[SUM.c][Thread 29728] Somma parziale: 12375000
+[SUM.c][Thread 29729] Somma parziale: 12375000
+[SUM.c][Thread 29730] Somma parziale: 12375000
+[SUM.c][Thread 29731] Somma parziale: 12375000
+[SUM.c] Somma parallela (T=4): 49500000
+[OK] i risultati coincidono!
+\end{lstlisting}
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 2: Barrier -- map-reduce parallelo}
+% ---------------------------------------------------------------------------
+
+L'esercizio implementa uno schema map-reduce in due fasi usando
+\texttt{pthread\_barrier\_t}: $T$ thread eseguono la fase di \emph{map}
+in parallelo (calcolo del quadrato di ogni elemento nel proprio segmento),
+si sincronizzano alla barrier, poi il solo thread che riceve
+\texttt{PTHREAD\_BARRIER\_SERIAL\_THREAD} esegue la fase di \emph{reduce}
+(somma di tutti i quadrati).
+
+\subsection*{Inizializzazione della barrier}
+
+La barrier va creata nel \texttt{main} prima di lanciare i thread,
+specificando il numero di thread che devono raggiungerla prima che
+vengano sbloccati:
+
+\begin{lstlisting}[caption={Inizializzazione e distruzione della barrier}]
+pthread_barrier_init(&barrier, NULL, T);
+/* ... creazione e join dei thread ... */
+pthread_barrier_destroy(&barrier);
+\end{lstlisting}
+
+\subsection*{Fase map e sincronizzazione}
+
+Ogni thread eleva al quadrato gli elementi nel proprio segmento, poi
+chiama \texttt{pthread\_barrier\_wait()}.
+La barrier blocca ogni thread finché tutti e $T$ non l'hanno raggiunta,
+garantendo che il reduce non inizi prima che il map sia completato da tutti.
+Lo standard POSIX garantisce che esattamente uno tra i $T$ thread riceva
+\texttt{PTHREAD\_BARRIER\_SERIAL\_THREAD}: è l'unico meccanismo di
+selezione ``uno tra N'' offerto da pthreads senza mutex.
+
+\begin{lstlisting}[caption={Funzione job: map, barrier e reduce}]
+static void job(void *args) {
+  worker_args *w = (worker_args *)args;
+  pid_t tid = gettid();
+
+  printf("[Thread %d] Iniziato il map...\n", tid);
+  map(w->array, w->from, w->to);
+
+  int rc = pthread_barrier_wait(&barrier);
+  if (rc == PTHREAD_BARRIER_SERIAL_THREAD) {
+    printf("[Thread %d Seriale %d] Iniziato il reduce...\n", tid, rc);
+    w->result = reduce(w->array);
+  }
+
+  pthread_exit(NULL);
+}
+\end{lstlisting}
+
+\medskip
+\noindent\textbf{Nota:} le slide riportano
+332\,833\,500\,000, che corrisponde a $N = 1\,000\,000$ elementi.
+Con $N = 800\,000$ (come specificato nell'esercizio) il valore corretto è
+peró $266\,266\,800\,000$.
+
+\begin{lstlisting}[language=bash, caption={Test Esercizio 2}]
+$ ./mapreduce
+Somma dei quadrati (sequenziale): 266266800000
+[Thread 58309] Iniziato il map...
+[Thread 58310] Iniziato il map...
+[Thread 58311] Iniziato il map...
+[Thread 58312] Iniziato il map...
+[Thread 58311 Seriale -1] Iniziato il reduce...
+Somma dei quadrati (parallela): 266266800000
+[OK] i risultati coincidono!
+\end{lstlisting}
+
+\end{document}
