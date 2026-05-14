@@ -1,0 +1,271 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{placeins}
+\usepackage{url}
+\setlength{\emergencystretch}{3em}
+
+\lstset{
+  language=C,
+  backgroundcolor=\color{lightgray!20},
+  frame=single,
+  breaklines=true,
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1,
+  numbersep=5pt,
+  captionpos=b,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{green!60!black},
+  stringstyle=\color{red},
+  showstringspaces=false
+}
+
+\title{LabReSiD26 -- Hands-On 14}
+\author{Davide Ferrara -- 518629}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 1: Conto corrente condiviso}
+% ---------------------------------------------------------------------------
+
+$N = 4$ sportelli operano in parallelo sullo stesso conto corrente condiviso,
+eseguendo in loop operazioni di deposito e prelievo.
+Il prelievo è condizionato al saldo disponibile, che non deve mai scendere
+sotto zero.
+
+\subsection*{Race condition senza mutex}
+
+Il controllo \texttt{if (saldo >= importo)} da solo non è sufficiente.
+Se due thread leggono \texttt{saldo} contemporaneamente, entrambi trovano
+la condizione vera ed eseguono entrambi il prelievo: il saldo può diventare
+negativo e il risultato cambia ad ogni esecuzione.
+L'intera sequenza \emph{leggi / controlla / modifica} deve essere atomica.
+
+\subsection*{Sezione critica con mutex}
+
+Si dichiara un \texttt{pthread\_mutex\_t} globale inizializzato staticamente
+con \texttt{PTHREAD\_MUTEX\_INITIALIZER}.
+Il mutex protegge sia il controllo \texttt{if} che la modifica di
+\texttt{saldo}: senza proteggere entrambi la race condition persiste.
+
+\begin{lstlisting}[caption={Sezione critica protetta da mutex}]
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * Per N_OPERAZIONI si calcola un importo random che va a 0 a 100.
+ * Se `i` e' pari allora l'importo si somma altrimenti si sottrae.
+ * Il controllo if (saldo >= importo) non e' sufficiente in quanto la
+ * funzione sportello viene eseguita da piu thread e saldo e' una
+ * variabile globale condivisa: se due thread scrivono parallelamente
+ * uno potrebbe sovrascrivere il risultato dell'altro.
+ * Il MUTEX garantisce che solo un thread alla volta acceda alla
+ * sezione critica.
+ * */
+void *sportello(void *arg) {
+  (void)arg;
+  unsigned int seed = 518629;
+  for (int i = 0; i < N_OPERAZIONI; i++) {
+    int importo = (rand_r(&seed) % 100) + 1;
+
+    // Sezione critica
+    pthread_mutex_lock(&mutex);
+    if (i % 2 == 0) {
+      saldo += importo;         /* deposito  */
+    } else {
+      if (saldo >= importo)     /* prelievo  */
+        saldo -= importo;
+    }
+    pthread_mutex_unlock(&mutex);
+    // Fine sezione critica
+  }
+  return NULL;
+}
+\end{lstlisting}
+
+\subsection*{Riproducibilità con \texttt{rand\_r}}
+
+\texttt{rand()} usa uno stato interno globale non thread-safe: più thread
+che lo chiamano contemporaneamente generano una race condition sullo stato
+interno, producendo sequenze diverse ad ogni esecuzione.
+Si usa \texttt{rand\_r(\&seed)} con un seed locale per thread, dichiarato
+fuori dal loop così che lo stato si aggiorni tra un'iterazione e l'altra.
+
+\begin{lstlisting}[language=bash, caption={Test Esercizio 1 -- risultato riproducibile}]
+$ ./banca
+Saldo finale: 131056 euro
+$ ./banca
+Saldo finale: 131056 euro
+$ ./banca
+Saldo finale: 131056 euro
+\end{lstlisting}
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 2: Stampante condivisa con timeout}
+% ---------------------------------------------------------------------------
+
+Un ufficio ha una sola stampante condivisa tra $N = 6$ utenti.
+Ogni utente tenta di acquisire la stampante: se non si libera entro
+3 secondi rinuncia. Una stampa richiede 2 secondi e gli utenti
+arrivano uno ogni 0.2 secondi.
+
+\subsection*{Timeout con \texttt{pthread\_mutex\_timedlock}}
+
+\texttt{pthread\_mutex\_timedlock()} richiede un tempo \textbf{assoluto}
+basato su \texttt{CLOCK\_REALTIME}. Si legge prima l'ora corrente con
+\texttt{clock\_gettime()} e poi si aggiungono i secondi di attesa.
+Le funzioni \texttt{pthread\_*} restituiscono il codice di errore
+direttamente come valore di ritorno, senza settare \texttt{errno}.
+Se restituisce \texttt{ETIMEDOUT} il mutex \textbf{non} è stato acquisito e
+chiamare \texttt{unlock()} in questo caso produrrebbe comportamento indefinito.
+
+\begin{lstlisting}[caption={Funzione utente con timeout}]
+void *utente(void *arg) {
+  int id = *(int *)arg;
+
+  /* Ora di sistema attuale (CLOCK_REALTIME) + 3 secondi */
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec += 3;
+
+  /* Provo ad acquisire il mutex per 3 secondi */
+  int rc = pthread_mutex_timedlock(&stampante, &ts);
+  if (rc == 0) {
+    printf("[Utente %d] Sta stampando... \n", id);
+    sleep(2); /* Simula la stampa */
+    printf("[Utente %d] Ha terminato la stampa :D \n", id);
+    pthread_mutex_unlock(&stampante);
+  } else if (rc == ETIMEDOUT) {
+    printf("[Utente %d] Rinuncia alla stampa :(\n", id);
+  } else {
+    printf("[Utente %d] Errore nell'acquisone del mutex.\n", id);
+  }
+  return NULL;
+}
+\end{lstlisting}
+
+\subsection*{Analisi del comportamento}
+
+Gli utenti arrivano ogni 0.2\,s, ogni stampa dura 2\,s e il timeout è
+3\,s. La timeline permette di ragionare su chi riesce a stampare:
+
+\begin{lstlisting}[language=bash]
+/*
+ *  0, 0.2, 0.4, 0.6, 0.8, 1, 1.2, 1.4, 1.6, 1.8, 2, 2.2, ...
+ * u0(stampa) -> sleep(2) .................. u0(termina)
+ *     u1(attende) -> wait(3) .............. u1(stampa) -> ...
+ *           u2(attende) -> wait(3) ..................... u2(rinuncia)
+ * */
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash, caption={Test Esercizio 2 -- stampa 2s\, timeout 3s}]
+$ ./stampante
+[Utente 0] Sta stampando...
+[Utente 0] Ha terminato la stampa :D
+[Utente 1] Sta stampando...
+[Utente 2] Rinuncia alla stampa :(
+[Utente 3] Rinuncia alla stampa :(
+[Utente 4] Rinuncia alla stampa :(
+[Utente 1] Ha terminato la stampa :D
+[Utente 5] Sta stampando...
+[Utente 5] Ha terminato la stampa :D
+\end{lstlisting}
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 3: Rubrica telefonica con rwlock}
+% ---------------------------------------------------------------------------
+
+Una rubrica è condivisa tra $N = 8$ thread lettori e un thread scrittore.
+I lettori fanno ricerche frequenti e possono leggere in parallelo tra loro;
+lo scrittore aggiorna i contatti raramente ma richiede accesso esclusivo.
+Un mutex ordinario serializzerebbe anche le letture tra loro, inutilmente.
+\texttt{pthread\_rwlock\_t} risolve questo: più lettori possono tenere il
+lock simultaneamente, mentre lo scrittore ottiene accesso esclusivo.
+
+\subsection*{Lettori in parallelo}
+
+Ogni lettore acquisisce il lock in lettura con
+\texttt{pthread\_rwlock\_rdlock()}, legge il contatto e rilascia.
+Più lettori possono tenere il lock contemporaneamente, perche leggere
+in parallelo è sempre safe.
+
+\begin{lstlisting}[caption={Thread lettore}]
+void *lettore(void *arg) {
+  int id = *(int *)arg;
+  for (int i = 0; i < 5; i++) {
+    // Acquisisce il lock in lettura
+    pthread_rwlock_rdlock(&rubrica_lock);
+
+    int idx = i % n_contatti;
+    printf("Lettore %d: %s -> %s\n", id, rubrica[idx].nome,
+           rubrica[idx].numero);
+    usleep(100000);
+
+    // Rilascia il lock
+    pthread_rwlock_unlock(&rubrica_lock);
+  }
+  return NULL;
+}
+\end{lstlisting}
+
+\subsection*{Scrittore con accesso esclusivo}
+
+Lo scrittore dorme 1 secondo per lasciare partire i lettori, poi acquisisce
+il lock in scrittura con \texttt{pthread\_rwlock\_wrlock()}: blocca finché
+tutti i lettori attivi non rilasciano il lock, poi ottiene accesso esclusivo 
+(scrive solamente quando nessuno legge).
+
+\begin{lstlisting}[caption={Thread scrittore}]
+void *scrittore(void *arg) {
+  (void)arg;
+  sleep(1); /* lascia partire i lettori */
+
+  pthread_rwlock_wrlock(&rubrica_lock);
+
+  printf("Scrittore: aggiorno il numero di Bob...\n");
+  strcpy(rubrica[1].numero, "333-9999");
+  sleep(2); /* simula aggiornamento lento */
+  printf("Scrittore: aggiornamento completato.\n");
+
+  pthread_rwlock_unlock(&rubrica_lock);
+  return NULL;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash, caption={Test Esercizio 3 -- interleaving, blocco scrittore e aggiornamento}]
+$ ./rubrica
+Lettore 0: Alice -> 333-1111          # prima tornata: lettori in parallelo
+Lettore 3: Alice -> 333-1111          # (interleaving visibile negli id)
+...
+Lettore 0: Bob -> 333-2222
+Lettore 4: Bob -> 333-2222
+Lettore 2: Bob -> 333-2222
+...
+Scrittore: aggiorno il numero di Bob...
+                                       # blocco silenzioso 2s (wrlock esclusivo)
+Scrittore: aggiornamento completato.
+Lettore 0: Alice -> 333-1111          # seconda tornata: lettori ripartono
+Lettore 1: Alice -> 333-1111
+...
+Lettore 0: Bob -> 333-9999            # numero aggiornato visibile a tutti
+Lettore 3: Bob -> 333-9999
+Lettore 1: Bob -> 333-9999
+...
+\end{lstlisting}
+
+L'interleaving degli id nei round di lettura conferma il parallelismo dei
+lettori. Il blocco silenzioso di 2 secondi tra i messaggi dello scrittore
+dimostra l'accesso esclusivo del wrlock. Nella seconda tornata tutti i
+lettori leggono \texttt{333-9999}: nessuno vede il vecchio valore dopo
+l'aggiornamento. Inoltre il programma non segnala nessuna race condition 
+che sarebbe comparsa compilando con \texttt{-fsanitize=thread}.
+
+\end{document}
