@@ -1,0 +1,90 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{placeins}
+\usepackage{url}
+\setlength{\emergencystretch}{3em}
+
+\lstset{
+  language=C,
+  backgroundcolor=\color{lightgray!20},
+  frame=single,
+  breaklines=true,
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1,
+  numbersep=5pt,
+  captionpos=b,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{green!60!black},
+  stringstyle=\color{red},
+  showstringspaces=false
+}
+
+\title{LabReSiD26 -- Hands-On 15}
+\author{Davide Ferrara -- 518629}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 1: Buffer circolare a singolo thread}
+% ---------------------------------------------------------------------------
+
+\subsection*{Cosa succede se \texttt{buf\_get} viene chiamata su un buffer vuoto?}
+
+Né \texttt{buf\_get} né \texttt{buf\_put} controllano \texttt{count} prima
+di operare: il campo è un semplice contatore senza guardia. Chiamare
+\texttt{buf\_get} su un buffer vuoto non produce nessun crash perché
+\texttt{head} rimane sempre dentro i limiti dell'array grazie al modulo
+$N$; \texttt{head} avanza circolarmente e torna a $0$, leggendo i valori
+stantii lasciati dal round precedente. Nel frattempo \texttt{count} scende
+a valori negativi senza alcun segnale di errore.
+
+\begin{lstlisting}[language=bash, caption={Cinque \texttt{buf\_get} extra su buffer vuoto}]
+Buffer: 12 13 14 15
+Tutti gli elementi prelevati correttamente.
+Buffer: 12 13 14 15
+Elemento extra: 12
+Elemento extra: 13
+Elemento extra: 14
+Elemento extra: 15
+Elemento extra: 12
+Buffer: 12 13 14 15
+\end{lstlisting}
+
+Le prime quattro chiamate restituiscono $12, 13, 14, 15$: i valori
+dell'ultimo round ancora presenti nelle celle. La quinta restituisce $12$
+di nuovo perché \texttt{head} ha completato il giro circolare e riparte
+da $0$.
+
+In un'implementazione corretta \texttt{buf\_get} dovrebbe controllare
+\texttt{count} prima di leggere: se \texttt{count} $= 0$ tutti gli
+elementi sono già stati prelevati e l'operazione non è consentita.
+In questa versione \texttt{count} non viene mai controllato da nessuna
+funzione, quindi il buffer non ha alcuna protezione contro letture oltre
+il limite.
+
+% ---------------------------------------------------------------------------
+\section{Esercizio 2: Due thread senza sincronizzazione}
+% ---------------------------------------------------------------------------
+
+\begin{lstlisting}[language=bash, caption={Output Helgrind -- race condition in \texttt{buf\_put}}]
+==21199== Possible data race during write of size 4 at 0x1FFEFFE4E8 by thread #2
+==21199== Locks held: none
+==21199==    at 0x40011D6: buf_put (in /home/dff/git/reti/ho15/step2)
+==21199==    by 0x4001268: produttore (in /home/dff/git/reti/ho15/step2)
+==21199==    by 0x485F47B: mythread_wrapper (hg_intercepts.c:410)
+==21199==    by 0x49381B8: start_thread (pthread_create.c:454)
+==21199==    by 0x49BD043: clone (clone.S:100)
+\end{lstlisting}
+
+% TODO
+
+\end{document}
